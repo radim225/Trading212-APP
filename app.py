@@ -77,8 +77,14 @@ try:
         if not cash_data:
             st.error("Failed to fetch cash balance. Please check your API key and try again.")
             st.stop()
-            
-        cash_balance = _as_float(cash_data.get("free", {}).get("value", 0))
+        
+        # Handle different response formats
+        if isinstance(cash_data, dict):
+            # New format: {"free": {"value": 123.45}}
+            cash_balance = _as_float(cash_data.get("free", {}).get("value", 0))
+        else:
+            # Fallback: assume it's the direct numeric value
+            cash_balance = _as_float(cash_data)
         
         # Get positions
         positions = client.get_positions()
