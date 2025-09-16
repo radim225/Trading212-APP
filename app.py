@@ -69,66 +69,142 @@ def convert_to_czk(amount: float, currency: str) -> float:
 # ---------------------------- Trading 212 Client ----------------------------
 class T212Client:
     def __init__(self, api_key: str, is_demo: bool = False):
+        self.api_key = api_key
+        self.base_url = "https://live.trading212.com/api/v0" if not is_demo else "https://demo.trading212.com/api/v0"
+        self.last_request_time = 0
+        self.min_request_interval = 1.0  # Start with 1 second between requests
+        self.rate_limit_reset = 0
+        
+        # Configure session
         self.session = requests.Session()
-        self.session.headers.update({"Authorization": api_key})
-        self.base = (
-            "https://demo.trading212.com/api/v0" if is_demo 
-            else "https://live.trading212.com/api/v0"
-        )
-    
+        self.session.headers.update({
+            "Authorization": self.api_key,
+            "User-Agent": "Trading212-Portfolio-App/1.0"
+        })
+
+    def _rate_limit(self):
+        """Enforce rate limiting between requests."""
+        now = time.time()
+        time_since_last = now - self.last_request_time
+        
+        if time_since_last < self.min_request_interval:
+            sleep_time = self.min_request_interval - time_since_last
+            logger.debug(f"Rate limiting: sleeping for {sleep_time:.2f}s")
+            time.sleep(sleep_time)
+            
+        self.last_request_time = time.time()
+
+    def _handle_rate_limit(self, response):
+        """Handle rate limit headers and update rate limiting parameters."""
+        if 'X-RateLimit-Remaining' in response.headers and 'X-RateLimit-Reset' in response.headers:
+            remaining = int(response.headers['X-RateLimit-Remaining'])
+            reset_time = int(response.headers['X-RateLimit-Reset'])
+            
+            if remaining < 5:  # If we're getting close to the limit
+                self.min_request_interval = 2.0  # Slow down
+            elif remaining < 10:
+                self.min_request_interval = 1.0
+            else:
+                self.min_request_interval = 0.5
+                
+            logger.debug(f"Rate limit: {remaining} requests remaining, reset at {reset_time}")
+
     def _get(self, endpoint: str) -> Any:
+        """Make a GET request with rate limiting and error handling."""
+        url = f"{self.base_url}{endpoint}"
+        logger.info(f"Making request to: {url}")
+        
+        # Enforce rate limiting
+        self._rate_limit()
+        
         try:
-            logger.info(f"Making request to: {self.base}{endpoint}")
-            response = self.session.get(f"{self.base}{endpoint}", timeout=30)
+            response = self.session.get(url, timeout=15)
             logger.info(f"Status Code: {response.status_code}")
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"Error fetching {endpoint}: {str(e)}")
-            st.error(f"Error fetching {endpoint}: {str(e)}")
+            
+            # Handle rate limiting
+            self._handle_rate_limit(response)
+            
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 429:  # Too Many Requests
+                retry_after = int(response.headers.get('Retry-After', 5))
+                logger.warning(f"Rate limited. Waiting {retry_after} seconds before retry...")
+                time.sleep(retry_after)
+                return self._get(endpoint)  # Retry once
+            else:
+                logger.error(f"Error {response.status_code}: {response.text}")
+                return None
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed: {str(e)}")
             return None
     
     def get_cash_balance(self) -> Dict[str, Any]:
-        logger.info("Fetching cash balance...")
-        data = self._get("/equity/account/cash")
-        if data and isinstance(data, dict):
-            logger.info(f"Cash balance response type: {type(data).__name__}")
-            logger.info(f"Cash balance response keys: {list(data.keys())}")
-            for key, value in data.items():
-                try:
-                    if isinstance(value, dict) and 'value' in value:
-                        logger.info(f"  {key}: {value['value']} (type: {type(value['value']).__name__})")
-                    else:
-                        logger.info(f"  {key}: {value} (type: {type(value).__name__})")
-                except Exception as e:
-                    logger.error(f"Error processing {key}: {str(e)}")
-                    continue
-        return data or {}  # Always return a dict to prevent None errors
+        """Fetch cash balance with retry logic and rate limiting."""
+        max_retries = 3
+        retry_delay = 5  # seconds
+        
+        for attempt in range(max_retries):
+            logger.info(f"Fetching cash balance (attempt {attempt + 1}/{max_retries})...")
+            data = self._get("/equity/account/cash")
+            
+            if data is not None:
+                if isinstance(data, dict):
+                    logger.info(f"Cash balance response type: {type(data).__name__}")
+                    logger.info(f"Cash balance response keys: {list(data.keys())}")
+                    for key, value in data.items():
+                        try:
+                            logger.debug(f"  {key}: {value} (type: {type(value).__name__})")
+                        except Exception as e:
+                            logger.error(f"Error logging {key}: {str(e)}")
+                    return data
+                else:
+                    logger.warning(f"Unexpected response type: {type(data).__name__}")
+            
+            if attempt < max_retries - 1:
+                logger.warning(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+        
+        logger.error("Failed to fetch cash balance after multiple attempts")
+        return {}
     
     def get_positions(self) -> List[Dict[str, Any]]:
-        logger.info("Fetching positions...")
-        try:
-            positions = self._get("/equity/portfolio")
-            if positions is None:
-                logger.warning("Received None response for positions")
-                return []
+        """Fetch portfolio positions with retry logic and rate limiting."""
+        max_retries = 3
+        retry_delay = 5  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Fetching positions (attempt {attempt + 1}/{max_retries})...")
+                data = self._get("/equity/portfolio")
                 
-            logger.info(f"Positions data type: {type(positions).__name__}")
-            
-            if not isinstance(positions, list):
-                logger.warning(f"Expected list but got {type(positions).__name__}")
-                return []
+                if data is not None:
+                    if isinstance(data, list):
+                        logger.info(f"Found {len(data)} positions")
+                        if data:
+                            logger.debug(f"First position: {data[0]}")
+                        return data
+                    else:
+                        logger.warning(f"Unexpected response type: {type(data).__name__}")
                 
-            logger.info(f"Found {len(positions)} positions")
-            if positions:
-                logger.debug(f"First position: {positions[0]}")
+                if attempt < max_retries - 1:
+                    logger.warning(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
                 
-            return positions
-            
-        except Exception as e:
-            logger.error(f"Error in get_positions: {str(e)}")
-            logger.error(traceback.format_exc())
-            return []
+            except Exception as e:
+                logger.error(f"Error in get_positions: {str(e)}")
+                logger.error(traceback.format_exc())
+                if attempt == max_retries - 1:
+                    return []
+                
+                logger.warning(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+        
+        logger.error("Failed to fetch positions after multiple attempts")
+        return []
     
     def get_account_info(self) -> Dict[str, Any]:
         return self._get("/equity/account/info")
