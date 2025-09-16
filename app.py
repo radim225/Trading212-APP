@@ -284,19 +284,26 @@ try:
         
         for pos in positions:
             try:
+                # Debug: Log the position data structure
+                logger.debug(f"Processing position: {json.dumps(pos, indent=2)}")
+                
                 # Safely get position data with defaults
                 ticker = pos.get("ticker", "Unknown")
-                # Use the full company name from our mapping
-                name = get_company_name(ticker)
                 
-                # Handle quantity - could be in different formats
-                quantity_data = pos.get("quantity", 0)
+                # Get the company name (this will use our new function)
+                name = get_company_name(ticker)
+                logger.debug(f"Resolved ticker {ticker} to name: {name}")
+                
+                # Handle quantity - Trading212 API returns a nested structure
+                quantity = 0
+                quantity_data = pos.get("quantity", {})
                 if isinstance(quantity_data, dict):
                     quantity = _as_float(quantity_data.get("value", 0))
                 else:
                     quantity = _as_float(quantity_data)
                 
-                # Handle current price
+                # Handle current price - Trading212 returns it in a nested structure
+                current_price = 0
                 current_price_data = pos.get("currentPrice", {})
                 if isinstance(current_price_data, dict):
                     current_price = _as_float(current_price_data.get("value", 0))
@@ -352,14 +359,21 @@ try:
         # Calculate portfolio metrics
         portfolio_total = total_value + cash_balance
         
-        # Display summary with proper formatting
+        # Display summary with better formatting
+        st.write("---")
+        st.subheader("Portfolio Summary")
+        
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Invested Value (CZK)", f"{total_value:,.2f}")
+            st.metric("Invested Value", f"{total_value:,.2f} CZK")
         with col2:
-            st.metric("Cash Balance (CZK)", f"{cash_balance:,.2f}")
+            st.metric("Cash Balance", f"{cash_balance:,.2f} CZK")
         with col3:
-            st.metric("Total Portfolio Value (CZK)", f"{portfolio_total:,.2f}")
+            total_portfolio = total_value + cash_balance
+            st.metric("Total Portfolio Value", f"{total_portfolio:,.2f} CZK")
+            
+        st.write("")
+        st.subheader("Holdings")
             
         # Add some spacing
         st.write("")
