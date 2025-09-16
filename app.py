@@ -101,14 +101,28 @@ class T212Client:
     
     def get_positions(self) -> List[Dict[str, Any]]:
         logger.info("Fetching positions...")
-        positions = self._get("/equity/portfolio")
-        if positions is not None:
+        try:
+            positions = self._get("/equity/portfolio")
+            if positions is None:
+                logger.warning("Received None response for positions")
+                return []
+                
             logger.info(f"Positions data type: {type(positions).__name__}")
-            if isinstance(positions, list):
-                logger.info(f"Found {len(positions)} positions")
-                if positions:
-                    logger.info(f"First position: {positions[0]}")
-        return positions
+            
+            if not isinstance(positions, list):
+                logger.warning(f"Expected list but got {type(positions).__name__}")
+                return []
+                
+            logger.info(f"Found {len(positions)} positions")
+            if positions:
+                logger.debug(f"First position: {positions[0]}")
+                
+            return positions
+            
+        except Exception as e:
+            logger.error(f"Error in get_positions: {str(e)}")
+            logger.error(traceback.format_exc())
+            return []
     
     def get_account_info(self) -> Dict[str, Any]:
         return self._get("/equity/account/info")
