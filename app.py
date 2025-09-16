@@ -199,7 +199,22 @@ try:
             # Get positions with error handling
             try:
                 st.sidebar.write("⏳ Fetching positions...")
-                positions = client.get_positions() or []
+                positions = client.get_positions()
+                
+                # Log the raw positions data for debugging
+                logger.info(f"Positions data type: {type(positions).__name__}")
+                if isinstance(positions, list):
+                    logger.info(f"Found {len(positions)} positions")
+                    if positions:
+                        logger.info(f"First position: {positions[0]}")
+                else:
+                    logger.info(f"Unexpected positions format: {positions}")
+                
+                # Ensure positions is a list
+                if not isinstance(positions, list):
+                    positions = []
+                    logger.warning("Positions data is not a list, using empty list")
+                
                 st.sidebar.success(f"✅ Found {len(positions)} positions")
                 
                 # Show raw positions in debug
@@ -207,44 +222,81 @@ try:
                     st.json(positions if positions else "No positions found")
                 
             except Exception as e:
+                logger.error(f"Error fetching positions: {str(e)}")
+                logger.error(traceback.format_exc())
                 st.sidebar.error(f"❌ Error fetching positions: {str(e)}")
                 st.error("Failed to fetch positions. Some data may be missing.")
                 positions = []
         
-        # Process positions
+        # Process positions with error handling
         holdings = []
         total_value = 0
         
         for pos in positions:
-            ticker = pos.get("ticker")
-            name = pos.get("name", ticker)
-            quantity = _as_float(pos.get("quantity"))
+            try:
+                # Safely get position data with defaults
+                ticker = pos.get("ticker", "Unknown")
+                name = pos.get("name", ticker)
+                
+                # Handle quantity - could be in different formats
+                quantity_data = pos.get("quantity", 0)
+                if isinstance(quantity_data, dict):
+                    quantity = _as_float(quantity_data.get("value", 0))
+                else:
+                    quantity = _as_float(quantity_data)
+                
+                # Handle current price
+                current_price_data = pos.get("currentPrice", {})
+                if isinstance(current_price_data, dict):
+                    current_price = _as_float(current_price_data.get("value", 0))
+                else:
+                    current_price = _as_float(current_price_data)
+                
+                # Handle average price
+                average_price = _as_float(pos.get("averagePrice", 0))
+                
+                # Calculate values with safety checks
+                value = quantity * current_price if quantity and current_price else 0
+                total_value += value
+                
+                # Calculate P&L with safety checks
+                pnl_value = value - (quantity * average_price) if quantity and average_price else 0
+                pnl_percent = ((current_price / average_price) - 1) * 100 if average_price and average_price != 0 else 0
+                
+                holdings.append({
+                    "Ticker": ticker,
+                    "Name": name,
+                    "Quantity": quantity,
+                    "Avg Price": average_price,
+                    "Current Price": current_price,
+                    "Value": value,
+                    "P&L": pnl_value,
+                    "P&L %": pnl_percent
+                })
+                
+            except Exception as e:
+                logger.error(f"Error processing position {pos.get('ticker', 'unknown')}: {str(e)}")
+                logger.error(f"Problematic position data: {pos}")
+                continue  # Skip this position but continue with others
+        
+        # Convert holdings to DataFrame for display
+        if holdings:
+            df_holdings = pd.DataFrame(holdings)
             
-            # Get current price and value
-            current_price = _as_float(pos.get("currentPrice", {}).get("value"))
-            current_value = quantity * current_price
+            # Format the DataFrame
+            df_holdings = df_holdings[["Ticker", "Name", "Quantity", "Avg Price", 
+                                    "Current Price", "Value", "P&L", "P&L %"]]
             
-            # Get average price and invested amount
-            avg_price = _as_float(pos.get("averagePrice"))
-            invested = quantity * avg_price
+            # Format numbers for display
+            df_holdings["Quantity"] = df_holdings["Quantity"].apply(lambda x: f"{x:,.2f}")
+            df_holdings["Avg Price"] = df_holdings["Avg Price"].apply(lambda x: f"{x:,.2f}")
+            df_holdings["Current Price"] = df_holdings["Current Price"].apply(lambda x: f"{x:,.2f}")
+            df_holdings["Value"] = df_holdings["Value"].apply(lambda x: f"{x:,.2f}")
+            df_holdings["P&L"] = df_holdings["P&L"].apply(lambda x: f"{x:,.2f}")
+            df_holdings["P&L %"] = df_holdings["P&L %"].apply(lambda x: f"{x:,.2f}%")
             
-            # Calculate P&L
-            pnl = current_value - invested
-            pnl_pct = (pnl / invested * 100) if invested else 0
-            
-            holdings.append({
-                "Ticker": ticker,
-                "Name": name,
-                "Quantity": quantity,
-                "Current Price (CZK)": current_price,
-                "Avg. Price (CZK)": avg_price,
-                "Current Value (CZK)": current_value,
-                "Invested (CZK)": invested,
-                "P&L (CZK)": pnl,
-                "P&L (%)": pnl_pct
-            })
-            
-            total_value += current_value
+            # Display the table
+            st.dataframe(df_holdings, use_container_width=True)
         
         # Display summary
         col1, col2, col3 = st.columns(3)
