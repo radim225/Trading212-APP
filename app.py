@@ -2,7 +2,18 @@ import os
 import streamlit as st
 import pandas as pd
 import requests
-from typing import Dict, Any, List, Optional
+import json
+import logging
+import traceback
+from typing import Dict, List, Any, Optional
+
+# Configure logging to stderr (will be captured in Streamlit logs)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stderr
+)
+logger = logging.getLogger(__name__)
 
 # ---------------------------- UI Setup ----------------------------
 st.set_page_config(page_title="Trading 212 Portfolio", layout="wide")
@@ -40,23 +51,30 @@ class T212Client:
     
     def _get(self, endpoint: str):
         url = f"{self.base}{endpoint}"
-        self.last_response = self.session.get(url, timeout=30)
-        
-        # Debug output
-        print(f"\n=== API Request ===")
-        print(f"URL: {url}")
-        print(f"Status Code: {self.last_response.status_code}")
-        print("Response Headers:")
-        for k, v in self.last_response.headers.items():
-            print(f"  {k}: {v}")
-            
         try:
-            data = self.last_response.json()
-            print("Response JSON:", json.dumps(data, indent=2))
-            return data
-        except ValueError:
-            print("Response Text:", self.last_response.text)
-            return self.last_response.text
+            logger.info(f"Making request to: {url}")
+            self.last_response = self.session.get(url, timeout=30)
+            
+            # Log request details
+            logger.info(f"Status Code: {self.last_response.status_code}")
+            logger.debug("Response Headers:")
+            for k, v in self.last_response.headers.items():
+                logger.debug(f"  {k}: {v}")
+            
+            # Try to parse JSON
+            try:
+                data = self.last_response.json()
+                logger.debug(f"Response JSON: {json.dumps(data, indent=2)}")
+                return data
+            except ValueError as e:
+                logger.warning(f"Failed to parse JSON response: {e}")
+                logger.debug(f"Raw response: {self.last_response.text}")
+                return self.last_response.text
+                
+        except Exception as e:
+            logger.error(f"Request failed: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
         except Exception as e:
             st.error(f"Error fetching {endpoint}: {str(e)}")
             return None
@@ -114,15 +132,20 @@ try:
                 "base_url": client.base if hasattr(client, 'base') else 'Not initialized'
             })
             
-            # Get cash balance
-            st.sidebar.write("Fetching cash balance...")
+            # Get cash balance with error handling
             try:
+                st.sidebar.write("⏳ Fetching cash balance...")
+                logger.info("Fetching cash balance...")
+                
                 cash_data = client.get_cash_balance()
-                st.sidebar.write("Cash balance response type:", type(cash_data).__name__)
+                logger.info(f"Cash balance response type: {type(cash_data).__name__}")
                 
                 # Show raw response in debug
                 with st.sidebar.expander("Raw Cash Balance Response"):
                     st.json(cash_data if cash_data is not None else "No data returned")
+                    
+                # Log the raw response for debugging
+                logger.debug(f"Cash balance raw response: {cash_data}")
                 
                 # Handle different response formats
                 if isinstance(cash_data, dict):
@@ -137,7 +160,10 @@ try:
                 st.sidebar.success(f"✅ Cash balance: {cash_balance:.2f}")
                 
             except Exception as e:
-                st.sidebar.error(f"❌ Error fetching cash balance: {str(e)}")
+                error_msg = f"❌ Error fetching cash balance: {str(e)}"
+                logger.error(error_msg)
+                logger.error(traceback.format_exc())
+                st.sidebar.error(error_msg)
                 st.error("Failed to fetch cash balance. Please check your API key and try again.")
                 st.stop()
             
