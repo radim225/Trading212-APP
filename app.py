@@ -261,51 +261,53 @@ try:
         total_current_value = 0
         
         for pos in positions:
-            ticker = pos.get("ticker")
-            name = get_company_name(ticker)
-            quantity = _as_float(pos.get("quantity"))
-            
-            # Handle CNX1_EQ (pennies) - convert from GBX to GBP
-            if ticker == 'CNX1_EQ':
-                current_price_gbx = _as_float(pos.get("currentPrice", {}).get("value"))
-                avg_price_gbx = _as_float(pos.get("averagePrice"))
+            try:
+                ticker = pos.get("ticker")
+                if not ticker:
+                    logger.warning(f"Skipping position with no ticker: {pos}")
+                    continue
+                    
+                name = get_company_name(ticker)
+                quantity = _as_float(pos.get("quantity", 0))
+                current_price = _as_float(pos.get("currentPrice", 0))
+                avg_price = _as_float(pos.get("averagePrice", 0))
                 
-                # Convert GBX to GBP (100 GBX = 1 GBP) and then to CZK
-                current_price = convert_to_czk(current_price_gbx / 100, 'GBP')
-                avg_price = convert_to_czk(avg_price_gbx / 100, 'GBP')
-            else:
-                # For other stocks, get price in original currency and convert to CZK
-                current_price_original = _as_float(pos.get("currentPrice", {}).get("value"))
-                avg_price_original = _as_float(pos.get("averagePrice"))
-                currency = pos.get("currentPrice", {}).get("currency", "USD")
+                # Convert to CZK (assuming USD as default currency for now)
+                current_price_czk = convert_to_czk(current_price, 'USD')
+                avg_price_czk = convert_to_czk(avg_price, 'USD')
                 
-                current_price = convert_to_czk(current_price_original, currency)
-                avg_price = convert_to_czk(avg_price_original, currency)
+                # Calculate values
+                current_value = quantity * current_price_czk
+                invested = quantity * avg_price_czk
+                
+                # Calculate P&L
+                pnl = current_value - invested
+                pnl_pct = (pnl / invested * 100) if invested else 0
+                
+                # Add to totals
+                total_invested += invested
+                total_current_value += current_value
+                
+                holdings.append({
+                    "Ticker": ticker,
+                    "Name": name,
+                    "Quantity": quantity,
+                    "Current Price (CZK)": current_price_czk,
+                    "Avg. Price (CZK)": avg_price_czk,
+                    "Current Value (CZK)": current_value,
+                    "Invested (CZK)": invested,
+                    "P&L (CZK)": pnl,
+                    "P&L (%)": pnl_pct
+                })
+                
+                logger.debug(f"Processed position: {ticker} - {quantity} @ {current_price_czk} CZK")
+                
+            except Exception as e:
+                logger.error(f"Error processing position: {str(e)}")
+                logger.error(f"Position data: {pos}")
+                logger.error(traceback.format_exc())
+                continue
             
-            # Calculate values
-            current_value = quantity * current_price
-            invested = quantity * avg_price
-            
-            # Calculate P&L
-            pnl = current_value - invested
-            pnl_pct = (pnl / invested * 100) if invested else 0
-            
-            # Add to totals
-            total_invested += invested
-            total_current_value += current_value
-            
-            holdings.append({
-                "Ticker": ticker,
-                "Name": name,
-                "Quantity": quantity,
-                "Current Price (CZK)": current_price,
-                "Avg. Price (CZK)": avg_price,
-                "Current Value (CZK)": current_value,
-                "Invested (CZK)": invested,
-                "P&L (CZK)": pnl,
-                "P&L (%)": pnl_pct
-            })
-        
         # Calculate totals
         total_portfolio_value = total_current_value + cash_balance + pie_cash
         
