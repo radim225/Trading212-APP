@@ -17,9 +17,15 @@ st.caption("View your current holdings and portfolio value")
 
 # ---------------------------- Helper Functions ----------------------------
 def _as_float(x, default: float = 0.0) -> float:
+    """Safely convert value to float, handling nested dictionaries."""
     try:
+        if x is None:
+            return default
+        if isinstance(x, dict):
+            # If it's a dictionary, try to get 'value' key
+            x = x.get('value', default)
         return float(x)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, AttributeError):
         return default
 
 def _as_list(obj: Any) -> List[Dict[str, Any]]:
@@ -151,8 +157,9 @@ try:
             st.stop()
                 
         # Get all cash values in CZK
-        cash_balance = convert_to_czk(_as_float(cash_data.get("free", {}).get("value", 0)), 'CZK')
-        pie_cash = convert_to_czk(_as_float(cash_data.get("pieCash", {}).get("value", 0)), 'CZK')
+        # The API returns cash values directly as numbers, not as {value: number} objects
+        cash_balance = convert_to_czk(_as_float(cash_data.get("free", 0)), 'CZK')
+        pie_cash = convert_to_czk(_as_float(cash_data.get("pieCash", 0)), 'CZK')
         
         # Get positions
         positions = client.get_positions()
