@@ -36,12 +36,27 @@ class T212Client:
             "https://demo.trading212.com/api/v0" if is_demo 
             else "https://live.trading212.com/api/v0"
         )
+        self.last_response = None
     
-    def _get(self, endpoint: str) -> Any:
+    def _get(self, endpoint: str):
+        url = f"{self.base}{endpoint}"
+        self.last_response = self.session.get(url, timeout=30)
+        
+        # Debug output
+        print(f"\n=== API Request ===")
+        print(f"URL: {url}")
+        print(f"Status Code: {self.last_response.status_code}")
+        print("Response Headers:")
+        for k, v in self.last_response.headers.items():
+            print(f"  {k}: {v}")
+            
         try:
-            response = self.session.get(f"{self.base}{endpoint}", timeout=30)
-            response.raise_for_status()
-            return response.json()
+            data = self.last_response.json()
+            print("Response JSON:", json.dumps(data, indent=2))
+            return data
+        except ValueError:
+            print("Response Text:", self.last_response.text)
+            return self.last_response.text
         except Exception as e:
             st.error(f"Error fetching {endpoint}: {str(e)}")
             return None
@@ -91,43 +106,55 @@ try:
         client = T212Client(api_key, is_demo)
         
         with st.spinner("Fetching portfolio data..."):
+            # Debug: Show request details
+            st.sidebar.write("Debug Info:")
+            st.sidebar.json({
+                "api_key_provided": bool(api_key),
+                "is_demo": is_demo,
+                "base_url": client.base if hasattr(client, 'base') else 'Not initialized'
+            })
+            
             # Get cash balance
-            cash_data = client.get_cash_balance()
-            
-            # Debug: Show raw API response
-            with st.expander("Debug: View raw API response"):
-                st.json(cash_data)
-            
-            if not cash_data:
+            st.sidebar.write("Fetching cash balance...")
+            try:
+                cash_data = client.get_cash_balance()
+                st.sidebar.write("Cash balance response type:", type(cash_data).__name__)
+                
+                # Show raw response in debug
+                with st.sidebar.expander("Raw Cash Balance Response"):
+                    st.json(cash_data if cash_data is not None else "No data returned")
+                
+                # Handle different response formats
+                if isinstance(cash_data, dict):
+                    # Try different possible response formats
+                    cash_balance = _as_float(cash_data.get("free", {}).get("value") or 
+                                          cash_data.get("cash", {}).get("value") or 
+                                          cash_data.get("balance") or
+                                          (next((v for v in cash_data.values() if isinstance(v, (int, float))), 0)))
+                else:
+                    cash_balance = _as_float(cash_data)
+                
+                st.sidebar.success(f"✅ Cash balance: {cash_balance:.2f}")
+                
+            except Exception as e:
+                st.sidebar.error(f"❌ Error fetching cash balance: {str(e)}")
                 st.error("Failed to fetch cash balance. Please check your API key and try again.")
                 st.stop()
             
-            # Handle different response formats
-            if isinstance(cash_data, dict):
-                # New format: {"free": {"value": 123.45}}
-                cash_balance = _as_float(cash_data.get("free", {}).get("value", 0))
+            # Get positions with error handling
+            try:
+                st.sidebar.write("⏳ Fetching positions...")
+                positions = client.get_positions() or []
+                st.sidebar.success(f"✅ Found {len(positions)} positions")
                 
-                # Alternative format: {"cash": {"value": 123.45}}
-                if cash_balance == 0 and "cash" in cash_data:
-                    cash_balance = _as_float(cash_data.get("cash", {}).get("value", 0))
-                    
-                # Direct numeric value
-                if cash_balance == 0 and any(isinstance(v, (int, float)) for v in cash_data.values()):
-                    for v in cash_data.values():
-                        if isinstance(v, (int, float)):
-                            cash_balance = _as_float(v)
-                            break
-            else:
-                # Fallback: assume it's the direct numeric value
-                cash_balance = _as_float(cash_data)
-            
-            # Get positions
-            positions = client.get_positions()
-            if positions is None:
-                st.error("Failed to fetch positions. Please try again later.")
-                st.stop()
+                # Show raw positions in debug
+                with st.sidebar.expander("Raw Positions Response"):
+                    st.json(positions if positions else "No positions found")
                 
-            positions = positions or []
+            except Exception as e:
+                st.sidebar.error(f"❌ Error fetching positions: {str(e)}")
+                st.error("Failed to fetch positions. Some data may be missing.")
+                positions = []
         
         # Process positions
         holdings = []
