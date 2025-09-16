@@ -60,39 +60,74 @@ class T212Client:
 with st.sidebar:
     st.header("Settings")
     default_key = st.secrets.get("T212_API_KEY", os.environ.get("T212_API_KEY", ""))
-    api_key = st.text_input("Trading 212 API key", type="password", value=default_key)
-    is_demo = st.checkbox("Use Demo Account", value=False)
     
-    if not api_key:
-        st.warning("Please enter your Trading 212 API key")
-        st.stop()
+    # Add demo mode option
+    use_demo_data = st.checkbox("View sample data (demo mode)", value=False)
+    
+    if not use_demo_data:
+        api_key = st.text_input("Trading 212 API key", type="password", value=default_key)
+        is_demo = st.checkbox("Use Demo Account", value=False)
+        
+        if not api_key:
+            st.warning("Please enter your Trading 212 API key or enable demo mode")
+            st.stop()
+    else:
+        api_key = ""
+        is_demo = False
 
 try:
-    # Initialize client
-    client = T212Client(api_key, is_demo)
-    
-    with st.spinner("Fetching portfolio data..."):
-        # Get cash balance
-        cash_data = client.get_cash_balance()
-        if not cash_data:
-            st.error("Failed to fetch cash balance. Please check your API key and try again.")
-            st.stop()
+    if use_demo_data:
+        # Show sample data in demo mode
+        st.info("Viewing sample data in demo mode. No API key required.")
         
-        # Handle different response formats
-        if isinstance(cash_data, dict):
-            # New format: {"free": {"value": 123.45}}
-            cash_balance = _as_float(cash_data.get("free", {}).get("value", 0))
-        else:
-            # Fallback: assume it's the direct numeric value
-            cash_balance = _as_float(cash_data)
+        # Sample data for demo
+        cash_balance = 1500.75
+        positions = [
+            {"ticker": "AAPL", "name": "Apple Inc.", "quantity": 10, "currentPrice": {"value": 175.50}, "averagePrice": 160.25},
+            {"ticker": "MSFT", "name": "Microsoft Corporation", "quantity": 5, "currentPrice": {"value": 300.20}, "averagePrice": 280.75}
+        ]
+    else:
+        # Initialize client with real API
+        client = T212Client(api_key, is_demo)
         
-        # Get positions
-        positions = client.get_positions()
-        if positions is None:
-            st.error("Failed to fetch positions. Please try again later.")
-            st.stop()
+        with st.spinner("Fetching portfolio data..."):
+            # Get cash balance
+            cash_data = client.get_cash_balance()
             
-        positions = positions or []
+            # Debug: Show raw API response
+            with st.expander("Debug: View raw API response"):
+                st.json(cash_data)
+            
+            if not cash_data:
+                st.error("Failed to fetch cash balance. Please check your API key and try again.")
+                st.stop()
+            
+            # Handle different response formats
+            if isinstance(cash_data, dict):
+                # New format: {"free": {"value": 123.45}}
+                cash_balance = _as_float(cash_data.get("free", {}).get("value", 0))
+                
+                # Alternative format: {"cash": {"value": 123.45}}
+                if cash_balance == 0 and "cash" in cash_data:
+                    cash_balance = _as_float(cash_data.get("cash", {}).get("value", 0))
+                    
+                # Direct numeric value
+                if cash_balance == 0 and any(isinstance(v, (int, float)) for v in cash_data.values()):
+                    for v in cash_data.values():
+                        if isinstance(v, (int, float)):
+                            cash_balance = _as_float(v)
+                            break
+            else:
+                # Fallback: assume it's the direct numeric value
+                cash_balance = _as_float(cash_data)
+            
+            # Get positions
+            positions = client.get_positions()
+            if positions is None:
+                st.error("Failed to fetch positions. Please try again later.")
+                st.stop()
+                
+            positions = positions or []
         
         # Process positions
         holdings = []
