@@ -336,13 +336,13 @@ cfg = T212Config(mode=mode, api_key=api_key)
 client = T212Client(cfg)
 
 @st.cache_data(ttl=60)
-def fetch_all(client: T212Client):
-    cash = client.get_account_cash()
-    pos = client.get_positions()
-    ords = client.get_orders_history()
-    txs = client.get_transactions()
-    dvs = client.get_dividends()
-    pies = client.get_pies()
+def fetch_all(_client):   # leading underscore tells Streamlit not to hash it
+    cash = _client.get_account_cash()
+    pos  = _client.get_positions()
+    ords = _client.get_orders_history()
+    txs  = _client.get_transactions()
+    dvs  = _client.get_dividends()
+    pies = _client.get_pies()
     return cash, pos, ords, txs, dvs, pies
 
 data = None
