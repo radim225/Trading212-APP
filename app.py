@@ -89,11 +89,15 @@ class T212Client:
             logger.info(f"Cash balance response type: {type(data).__name__}")
             logger.info(f"Cash balance response keys: {list(data.keys())}")
             for key, value in data.items():
-                if value is not None and 'value' in value:
-                    logger.info(f"  {key}: {value['value']} (type: {type(value['value']).__name__})")
-                else:
-                    logger.info(f"  {key}: {value} (type: {type(value).__name__})")
-        return data
+                try:
+                    if isinstance(value, dict) and 'value' in value:
+                        logger.info(f"  {key}: {value['value']} (type: {type(value['value']).__name__})")
+                    else:
+                        logger.info(f"  {key}: {value} (type: {type(value).__name__})")
+                except Exception as e:
+                    logger.error(f"Error processing {key}: {str(e)}")
+                    continue
+        return data or {}  # Always return a dict to prevent None errors
     
     def get_positions(self) -> List[Dict[str, Any]]:
         logger.info("Fetching positions...")
