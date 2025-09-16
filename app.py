@@ -227,19 +227,28 @@ def df_from_dividends(data: Any) -> pd.DataFrame:
         if not isinstance(it, dict):
             continue
         amt = it.get("amount")
+        amount = None
+        ccy = None
+        
         if isinstance(amt, dict):
             amount = _as_float(amt.get("value"))
-            ccy    = amt.get("currencyCode") or it.get("currencyCode")
-        else:
+            ccy = amt.get("currencyCode")
+        elif amt is not None:  # Handle case where amt is a string or number
             amount = _as_float(amt)
-            ccy    = it.get("currencyCode")
+            
+        ccy = ccy or it.get("currencyCode") or account_ccy
+        
         rows.append({
             "paidOn": pd.to_datetime(it.get("paidOn") or it.get("date"), utc=True, errors="coerce"),
             "ticker": it.get("ticker"),
-            "name":   it.get("name"),
-            "amount": amount,
+            "name": it.get("name"),
+            "amount": amount or 0.0,
             "currencyCode": ccy
         })
+    
+    if not rows:
+        return pd.DataFrame(columns=["paidOn", "ticker", "name", "amount", "currencyCode"])
+        
     df = pd.DataFrame(rows)
     return df.sort_values("paidOn") if not df.empty else df
 
@@ -356,11 +365,16 @@ nav_total = nav_positions + (cash_val or 0.0)
 
 # XIRR from cashflows (treat positive amounts as inflows; add terminal -NAV)
 cf = []
-for _, r in (df_txs or pd.DataFrame()).iterrows():
-    if pd.isna(r.get("date")) or pd.isna(r.get("amount")):
-        continue
-    cf.append((r["date"], r["amount"]))
-cf.append((now_utc(), -nav_total))
+if df_txs is not None and not df_txs.empty:
+    for _, r in df_txs.iterrows():
+        if pd.isna(r.get("date")) or pd.isna(r.get("amount")):
+            continue
+        cf.append((r["date"], r["amount"]))
+
+# Add terminal value if we have a valid NAV
+if pd.notna(nav_total) and nav_total != 0:
+    cf.append((now_utc(), -nav_total))
+
 xirr_all = xirr(cf) if len(cf) >= 2 else np.nan
 
 # Dividends by month / TTM
@@ -468,4 +482,3 @@ with t4:
 
 with t5:
     st.json(pies_raw or {})
-    
