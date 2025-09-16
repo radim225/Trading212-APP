@@ -1,25 +1,23 @@
-# app.py — Trading 212 Streamlit Dashboard (read-only)
-# Paste your API key in the sidebar or store it as Secret T212_API_KEY (or env var T212_API_KEY).
+# app.py — Trading 212 Portfolio Summary
+# Shows current holdings, values in CZK, and cash balance
 
-import os, time, math
-from dataclasses import dataclass
-from typing import List, Optional, Tuple, Dict, Any
-
+import os
+import time
 import requests
 import pandas as pd
-import numpy as np
 import streamlit as st
-
-# Optional: price/benchmark analytics
-try:
-    import yfinance as yf
-except Exception:
-    yf = None
+from typing import Dict, Any, Optional, List
 
 # ---------------------------- UI setup ----------------------------
-st.set_page_config(page_title="Trading 212 Dashboard", layout="wide")
-st.title("📈 Trading 212 Portfolio Dashboard")
-st.caption("Read-only. Enter your API key in the sidebar (or set Secret T212_API_KEY).")
+st.set_page_config(page_title="Trading 212 Portfolio", layout="wide")
+st.title("📊 Trading 212 Portfolio")
+st.caption("View your current holdings and portfolio value")
+
+def _as_float(x) -> float:
+    try:
+        return float(x)
+    except (ValueError, TypeError):
+        return 0.0
 
 # ---------------------------- helpers ----------------------------
 def now_utc() -> pd.Timestamp:
@@ -69,75 +67,32 @@ def _as_list(obj: Any) -> List[Dict[str, Any]]:
         return []
     return []
 
-# ---------------------------- API client ----------------------------
-@dataclass
-class T212Config:
-    mode: str = "live"   # "live" or "demo"
-    api_key: str = ""
-    timeout: int = 30
-
 class T212Client:
-    def __init__(self, cfg: T212Config):
-        self.cfg = cfg
+    def __init__(self, api_key: str, is_demo: bool = False):
         self.session = requests.Session()
-        # Trading212 expects the API key directly in Authorization header (no 'Bearer' prefix)
-        self.session.headers.update({"Authorization": cfg.api_key})
+        self.session.headers.update({"Authorization": api_key})
         self.base = (
-            "https://live.trading212.com/api/v0"
-            if cfg.mode == "live"
-            else "https://demo.trading212.com/api/v0"
+            "https://demo.trading212.com/api/v0" if is_demo 
+            else "https://live.trading212.com/api/v0"
         )
 
-    def _get(self, path: str, params: Optional[dict] = None, retry: int = 3):
-        url = f"{self.base}{path}"
-        err = None
-        for i in range(retry):
-            r = self.session.get(url, params=params, timeout=self.cfg.timeout)
-            if r.status_code == 429:
-                wait_s = int(r.headers.get("Retry-After", "5"))
-                time.sleep(min(wait_s, 10))
-                continue
-            if r.ok:
-                try:
-                    return r.json()
-                except Exception:
-                    return None
-            err = r
-            time.sleep(1 + i)  # small backoff
-        if err is not None:
-            try:
-                err.raise_for_status()
-            except Exception as e:
-                body = (err.text or "")[:300]
-                raise RuntimeError(f"{e} | body={body}")
-        return None
+    def _get(self, endpoint: str):
+        try:
+            response = self.session.get(f"{self.base}{endpoint}", timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            st.error(f"Error fetching {endpoint}: {str(e)}")
+            return None
 
-    # ---- Correct endpoint paths ----
-    def get_account_cash(self):
+    def get_cash_balance(self):
         return self._get("/equity/account/cash")
+
+    def get_positions(self):
+        return self._get("/equity/portfolio")
 
     def get_account_info(self):
         return self._get("/equity/account/info")
-
-    def get_positions(self):
-        # Correct path (not /equity/portfolio/position)
-        return self._get("/equity/portfolio")
-
-    def get_orders_history(self, **params):
-        return self._get("/equity/history/orders", params=params)
-
-    def get_transactions(self, **params):
-        # history endpoints under /history/...
-        return self._get("/history/transactions", params=params)
-
-    def get_dividends(self, **params):
-        return self._get("/history/dividends", params=params)
-
-    def get_pies(self):
-        return self._get("/equity/pies")
-
-    def get_instruments(self):
-        return self._get("/equity/metadata/instruments")
 
 # ---------------------------- finance utils ----------------------------
 def xirr(cashflows: List[Tuple[pd.Timestamp, float]], guess: float = 0.1, tol=1e-6, max_iter=100) -> float:
@@ -311,106 +266,123 @@ def fetch_price_history(y_symbols: List[str], start: str, end: str) -> pd.DataFr
         df = df.to_frame(name=y_symbols[0])
     return df.ffill()
 
-# ---------------------------- sidebar ----------------------------
+# ---------------------------- Sidebar ----------------------------
 with st.sidebar:
     st.header("Settings")
     default_key = st.secrets.get("T212_API_KEY", os.environ.get("T212_API_KEY", ""))
     api_key = st.text_input("Trading 212 API key", type="password", value=default_key)
-    mode = st.radio("Mode", ["live", "demo"], horizontal=True)
-    risk_free = st.number_input("Risk-free rate (annual, %)", 0.0, 10.0, 0.0, step=0.25) / 100.0
-    enable_prices = st.toggle("Enable price-powered analytics (optional)", value=False)
-    benchmark = st.text_input("Benchmark (Yahoo)", value="^GSPC")
-    lookback_years = st.slider("Price lookback (years)", 1, 10, 3)
-    mapping_text = st.text_area("Ticker mapping lines  T212,Yahoo", value="", height=80)
-    refresh = st.button("🔄 Refresh")
+    is_demo = st.checkbox("Use Demo Account", value=False)
+    refresh = st.button("🔄 Refresh Data")
 
 if not api_key:
-    st.info("Add your API key in the sidebar (or set Secret T212_API_KEY).")
+    st.info("🔑 Please add your Trading 212 API key in the sidebar")
     st.stop()
 
-cfg = T212Config(mode=mode, api_key=api_key)
-client = T212Client(cfg)
+# Initialize client
+client = T212Client(api_key, is_demo)
 
-# ---------------------------- cached fetch (hash-safe) ----------------------------
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_all(_client: T212Client):
-    cash = _client.get_account_cash()
-    pos  = _client.get_positions()
-    ords = _client.get_orders_history()
-    txs  = _client.get_transactions()
-    dvs  = _client.get_dividends()
-    pies = _client.get_pies()
-    return cash, pos, ords, txs, dvs, pies
-
-try:
-    if refresh:
-        fetch_all.clear()
-    cash_raw, positions_raw, orders_raw, txs_raw, dividends_raw, pies_raw = fetch_all(client)
-except Exception as e:
-    st.error(f"API error: {e}")
-    st.stop()
-
-# ---------------------------- processing ----------------------------
-account_ccy = (cash_raw or {}).get("currencyCode") or "EUR"
-cash_val = _as_float(_safe_get(cash_raw, "cash", "value") or (cash_raw or {}).get("cash") or 0.0)
-
-df_pos = df_from_positions(positions_raw)
-df_div = df_from_dividends(dividends_raw)
-df_txs = df_from_transactions(txs_raw)
-df_ord = df_from_orders(orders_raw)
-
-df_pos["value_native"] = df_pos.get("current_value_native", pd.Series(dtype=float)).fillna(0.0)
-nav_positions = float(df_pos["value_native"].sum()) if not df_pos.empty else 0.0
-nav_total = nav_positions + (cash_val or 0.0)
-
-# XIRR from cashflows (treat positive amounts as inflows; add terminal -NAV)
-cf = []
-if df_txs is not None and not df_txs.empty:
-    for _, r in df_txs.iterrows():
-        if pd.isna(r.get("date")) or pd.isna(r.get("amount")):
-            continue
-        cf.append((r["date"], r["amount"]))
-
-# Add terminal value if we have a valid NAV
-if pd.notna(nav_total) and nav_total != 0:
-    cf.append((now_utc(), -nav_total))
-
-xirr_all = xirr(cf) if len(cf) >= 2 else np.nan
-
-# Dividends by month / TTM
-if not df_div.empty:
-    last12 = df_div[df_div["paidOn"] >= (now_utc() - pd.DateOffset(years=1))]
-    ttm_div = float(last12["amount"].sum())
-    dmon = df_div.copy()
-    dmon["month"] = pd.to_datetime(dmon["paidOn"]).dt.to_period("M").dt.to_timestamp()
-    div_by_month = dmon.groupby("month")["amount"].sum()
-else:
-    ttm_div = 0.0
-    div_by_month = pd.Series(dtype=float)
-
-# Allocation view
-alloc = df_pos.copy()
-if not alloc.empty and nav_total > 0:
-    alloc["weight"] = alloc["value_native"] / nav_total
-    alloc_view = alloc[["ticker", "name", "value_native", "weight"]].sort_values("weight", ascending=False)
-else:
-    alloc_view = pd.DataFrame()
-
-# ---------------------------- overview ----------------------------
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("NAV (incl. cash)", _fmtccy(nav_total, account_ccy))
-c2.metric("Cash", _fmtccy(cash_val, account_ccy))
-c3.metric("Positions value", _fmtccy(nav_positions, account_ccy))
-c4.metric("XIRR (since inception)", f"{xirr_all*100:,.2f}%" if pd.notna(xirr_all) else "—")
-
-st.subheader("Holdings")
-st.dataframe(alloc_view if not alloc_view.empty else pd.DataFrame({"info": ["No positions"]}))
-
-st.subheader("Dividends")
-if not div_by_month.empty:
-    st.line_chart(div_by_month)
-else:
-    st.info("No dividends yet.")
+# Fetch data
+with st.spinner("Fetching portfolio data..."):
+    try:
+        # Get cash balance
+        cash_data = client.get_cash_balance()
+        cash_balance = _as_float(cash_data.get("free", {}).get("value", 0))
+        
+        # Get positions
+        positions = client.get_positions() or []
+        
+        # Process positions
+        holdings = []
+        total_value = 0
+        
+        for pos in positions:
+            ticker = pos.get("ticker")
+            name = pos.get("name", ticker)
+            quantity = _as_float(pos.get("quantity"))
+            
+            # Get current price
+            price_data = pos.get("currentPrice", {})
+            price = _as_float(price_data.get("value"))
+            
+            # Get average price
+            avg_price_data = pos.get("averagePrice", {})
+            avg_price = _as_float(avg_price_data.get("value"))
+            
+            # Calculate values
+            current_value = quantity * price
+            invested_amount = quantity * avg_price
+            pnl = current_value - invested_amount
+            pnl_pct = (pnl / invested_amount * 100) if invested_amount else 0
+            
+            holdings.append({
+                "Ticker": ticker,
+                "Name": name,
+                "Quantity": quantity,
+                "Current Price (CZK)": price,
+                "Avg. Price (CZK)": avg_price,
+                "Current Value (CZK)": current_value,
+                "Invested (CZK)": invested_amount,
+                "P&L (CZK)": pnl,
+                "P&L (%)": pnl_pct
+            })
+            
+            total_value += current_value
+        
+        # Create DataFrame
+        df_holdings = pd.DataFrame(holdings)
+        
+        # Display summary
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Portfolio Value (CZK)", f"{total_value:,.2f}")
+        with col2:
+            st.metric("Cash Balance (CZK)", f"{cash_balance:,.2f}")
+        with col3:
+            st.metric("Total Value (CZK)", f"{total_value + cash_balance:,.2f}")
+        
+        # Display holdings table
+        st.subheader("Current Holdings")
+        if not df_holdings.empty:
+            # Format numbers
+            format_dict = {
+                'Current Price (CZK)': '{:,.2f}',
+                'Avg. Price (CZK)': '{:,.2f}',
+                'Current Value (CZK)': '{:,.2f}',
+                'Invested (CZK)': '{:,.2f}',
+                'P&L (CZK)': '{:,.2f}',
+                'P&L (%)': '{:.2f}%',
+                'Quantity': '{:,.2f}'
+            }
+            
+            # Apply formatting
+            for col, fmt in format_dict.items():
+                if col in df_holdings.columns:
+                    df_holdings[col] = df_holdings[col].apply(lambda x: fmt.format(x) if pd.notnull(x) else "")
+            
+            st.dataframe(
+                df_holdings,
+                column_config={
+                    "Ticker": "Ticker",
+                    "Name": "Company Name",
+                    "Quantity": "Shares",
+                    "Current Price (CZK)": st.column_config.NumberColumn("Current Price"),
+                    "Avg. Price (CZK)": st.column_config.NumberColumn("Avg. Cost"),
+                    "Current Value (CZK)": st.column_config.NumberColumn("Market Value"),
+                    "Invested (CZK)": st.column_config.NumberColumn("Invested"),
+                    "P&L (CZK)": st.column_config.NumberColumn("P&L"),
+                    "P&L (%)": st.column_config.NumberColumn("P&L %")
+                },
+                hide_index=True,
+                use_container_width=True
+            )
+        else:
+            st.info("No positions found in your portfolio.")
+            
+    except Exception as e:
+        st.error(f"Error fetching data: {str(e)}")
+        st.info("Please check your API key and try again.")
+        if st.checkbox("Show error details"):
+            st.exception(e)
 
 # ---------------------------- optional price analytics ----------------------------
 if enable_prices and yf is not None:
