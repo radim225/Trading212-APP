@@ -235,9 +235,15 @@ try:
             st.stop()
                 
         # Get all cash values in CZK
-        # The API returns cash values directly as numbers, not as {value: number} objects
-        cash_balance = convert_to_czk(_as_float(cash_data.get("free", 0)), 'CZK')
-        pie_cash = convert_to_czk(_as_float(cash_data.get("pieCash", 0)), 'CZK')
+        # The API might return values as direct numbers or as {'value': number} objects
+        def get_cash_value(data, key):
+            value = data.get(key, 0)
+            if isinstance(value, dict) and 'value' in value:
+                return _as_float(value['value'])
+            return _as_float(value)
+            
+        cash_balance = convert_to_czk(get_cash_value(cash_data, "free"), 'CZK')
+        pie_cash = convert_to_czk(get_cash_value(cash_data, "pieCash"), 'CZK')
         
         # Get positions
         positions = client.get_positions()
