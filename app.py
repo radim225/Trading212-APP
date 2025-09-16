@@ -1,9 +1,9 @@
 # app.py — Trading 212 Streamlit Dashboard (read-only)
-# Paste your API key in the sidebar or store it in Secrets as T212_API_KEY.
+# Paste your API key in the sidebar or store it as Secret T212_API_KEY (or env var T212_API_KEY).
 
-import math, time, os
+import os, time, math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 
 import requests
 import pandas as pd
@@ -22,22 +22,22 @@ st.title("📈 Trading 212 Portfolio Dashboard")
 st.caption("Read-only. Enter your API key in the sidebar (or set Secret T212_API_KEY).")
 
 # ---------------------------- helpers ----------------------------
-def now_utc():
+def now_utc() -> pd.Timestamp:
     return pd.Timestamp.now(tz="UTC")
 
-def _fmtccy(x, ccy=""):
+def _fmtccy(x, ccy="") -> str:
     try:
         return f"{float(x):,.2f} {ccy}".strip()
     except Exception:
         return str(x)
 
-def _as_float(x):
+def _as_float(x) -> float:
     try:
         return float(x)
     except Exception:
         return np.nan
 
-def _safe_get(d: dict, *keys, default=None):
+def _safe_get(d: Dict[str, Any], *keys, default=None):
     cur = d
     for k in keys:
         if isinstance(cur, dict) and k in cur:
@@ -45,6 +45,29 @@ def _safe_get(d: dict, *keys, default=None):
         else:
             return default
     return cur
+
+def _as_list(obj: Any) -> List[Dict[str, Any]]:
+    """
+    Normalize any T212 API response shape (list/dict) to a list of dict rows.
+    - If dict, look for common container keys and return their list.
+    - Else return [].
+    """
+    if obj is None:
+        return []
+    if isinstance(obj, list):
+        return obj
+    if isinstance(obj, dict):
+        for k in ("items", "dividends", "transactions", "orders", "positions",
+                  "portfolio", "data", "results"):
+            v = obj.get(k)
+            if isinstance(v, list):
+                return v
+        # fallback: first list value
+        for v in obj.values():
+            if isinstance(v, list):
+                return v
+        return []
+    return []
 
 # ---------------------------- API client ----------------------------
 @dataclass
@@ -57,7 +80,7 @@ class T212Client:
     def __init__(self, cfg: T212Config):
         self.cfg = cfg
         self.session = requests.Session()
-        # Trading212 expects the API key in the Authorization header (no "Bearer")
+        # Trading212 expects the API key directly in Authorization header (no 'Bearer' prefix)
         self.session.headers.update({"Authorization": cfg.api_key})
         self.base = (
             "https://live.trading212.com/api/v0"
@@ -65,8 +88,9 @@ class T212Client:
             else "https://demo.trading212.com/api/v0"
         )
 
-    def _get(self, path: str, params: dict | None = None, retry: int = 3):
+    def _get(self, path: str, params: Optional[dict] = None, retry: int = 3):
         url = f"{self.base}{path}"
+        err = None
         for i in range(retry):
             r = self.session.get(url, params=params, timeout=self.cfg.timeout)
             if r.status_code == 429:
@@ -78,13 +102,15 @@ class T212Client:
                     return r.json()
                 except Exception:
                     return None
-            # small backoff for transient 5xx/4xx noise
-            time.sleep(1 + i)
-        # raise the last error with body for easier debugging
-        try:
-            r.raise_for_status()
-        except Exception as e:
-            raise RuntimeError(f"{e} | body={r.text[:300]}")
+            err = r
+            time.sleep(1 + i)  # small backoff
+        if err is not None:
+            try:
+                err.raise_for_status()
+            except Exception as e:
+                body = (err.text or "")[:300]
+                raise RuntimeError(f"{e} | body={body}")
+        return None
 
     # ---- Correct endpoint paths ----
     def get_account_cash(self):
@@ -94,14 +120,14 @@ class T212Client:
         return self._get("/equity/account/info")
 
     def get_positions(self):
-        # correct path (was /equity/portfolio/position -> 404)
+        # Correct path (not /equity/portfolio/position)
         return self._get("/equity/portfolio")
 
     def get_orders_history(self, **params):
         return self._get("/equity/history/orders", params=params)
 
     def get_transactions(self, **params):
-        # history endpoints live under /history/...
+        # history endpoints under /history/...
         return self._get("/history/transactions", params=params)
 
     def get_dividends(self, **params):
@@ -114,11 +140,10 @@ class T212Client:
         return self._get("/equity/metadata/instruments")
 
 # ---------------------------- finance utils ----------------------------
-def xirr(cashflows: List[Tuple[pd.Timestamp, float]], guess: float = 0.1, tol=1e-6, max_iter=100):
+def xirr(cashflows: List[Tuple[pd.Timestamp, float]], guess: float = 0.1, tol=1e-6, max_iter=100) -> float:
     """
-    XIRR for irregular cash flows. Convention here:
-    + amount = money IN (deposits, proceeds); − amount = money OUT (contributions if you use the opposite convention)
-    We add a terminal flow of -NAV to close the position at 'today'.
+    XIRR for irregular cash flows.
+    We add a terminal -NAV to close the position at 'today'.
     """
     cfs = [(pd.Timestamp(d, tz="UTC"), float(a)) for d, a in cashflows if not np.isclose(a, 0.0)]
     if not cfs:
@@ -131,7 +156,6 @@ def xirr(cashflows: List[Tuple[pd.Timestamp, float]], guess: float = 0.1, tol=1e
 
     r = guess
     for _ in range(max_iter):
-        # numerical derivative
         h = 1e-6
         f0 = f(r)
         f1 = f(r + h)
@@ -173,18 +197,20 @@ def sharpe_ratio(returns: pd.Series, rf_rate_annual: float = 0.0, periods_per_ye
     return float(mu / sigma) if sigma else np.nan
 
 # ---------------------------- transformers ----------------------------
-def df_from_positions(data: list) -> pd.DataFrame:
+def df_from_positions(data: Any) -> pd.DataFrame:
     rows = []
-    for it in data or []:
+    for it in _as_list(data):
+        if not isinstance(it, dict):
+            continue
         avg = it.get("averagePrice")
         cur = it.get("currentPrice")
         rows.append({
             "ticker": it.get("ticker") or it.get("symbol"),
             "name": it.get("name") or it.get("shortName"),
             "quantity": _as_float(it.get("quantity")),
-            "avg_price": _as_float(avg["value"] if isinstance(avg, dict) else avg),
+            "avg_price": _as_float(avg.get("value") if isinstance(avg, dict) else avg),
             "avg_price_ccy": (avg or {}).get("currencyCode") if isinstance(avg, dict) else it.get("currencyCode"),
-            "current_price": _as_float(cur["value"] if isinstance(cur, dict) else cur),
+            "current_price": _as_float(cur.get("value") if isinstance(cur, dict) else cur),
             "current_price_ccy": (cur or {}).get("currencyCode") if isinstance(cur, dict) else it.get("currencyCode"),
             "pnl": _as_float(it.get("pnl") or it.get("unrealizedPl")),
             "isin": it.get("isin"),
@@ -195,45 +221,66 @@ def df_from_positions(data: list) -> pd.DataFrame:
         df["current_value_native"] = df["quantity"].fillna(0) * df["current_price"].fillna(0)
     return df
 
-def df_from_dividends(data: list) -> pd.DataFrame:
+def df_from_dividends(data: Any) -> pd.DataFrame:
     rows = []
-    for it in data or []:
+    for it in _as_list(data):
+        if not isinstance(it, dict):
+            continue
         amt = it.get("amount")
-        amount = _as_float(amt["value"]) if isinstance(amt, dict) else _as_float(amt)
-        ccy = (amt or {}).get("currencyCode") if isinstance(amt, dict) else it.get("currencyCode")
+        if isinstance(amt, dict):
+            amount = _as_float(amt.get("value"))
+            ccy    = amt.get("currencyCode") or it.get("currencyCode")
+        else:
+            amount = _as_float(amt)
+            ccy    = it.get("currencyCode")
         rows.append({
-            "paidOn": pd.to_datetime(it.get("paidOn") or it.get("date"), utc=True),
-            "ticker": it.get("ticker"), "name": it.get("name"),
-            "amount": amount, "currencyCode": ccy
+            "paidOn": pd.to_datetime(it.get("paidOn") or it.get("date"), utc=True, errors="coerce"),
+            "ticker": it.get("ticker"),
+            "name":   it.get("name"),
+            "amount": amount,
+            "currencyCode": ccy
         })
     df = pd.DataFrame(rows)
     return df.sort_values("paidOn") if not df.empty else df
 
-def df_from_transactions(data: list) -> pd.DataFrame:
+def df_from_transactions(data: Any) -> pd.DataFrame:
     rows = []
-    for it in data or []:
+    for it in _as_list(data):
+        if not isinstance(it, dict):
+            continue
         amt = it.get("amount")
-        amount = _as_float(amt["value"]) if isinstance(amt, dict) else _as_float(amt)
-        ccy = (amt or {}).get("currencyCode") if isinstance(amt, dict) else it.get("currencyCode")
+        if isinstance(amt, dict):
+            amount = _as_float(amt.get("value"))
+            ccy    = amt.get("currencyCode") or it.get("currencyCode")
+        else:
+            amount = _as_float(amt)
+            ccy    = it.get("currencyCode")
         rows.append({
-            "date": pd.to_datetime(it.get("date") or it.get("time"), utc=True),
-            "type": it.get("type"), "amount": amount, "currencyCode": ccy,
+            "date": pd.to_datetime(it.get("date") or it.get("time"), utc=True, errors="coerce"),
+            "type": it.get("type"),
+            "amount": amount,
+            "currencyCode": ccy,
             "description": it.get("description") or it.get("reason")
         })
     df = pd.DataFrame(rows)
     return df.sort_values("date") if not df.empty else df
 
-def df_from_orders(data: list) -> pd.DataFrame:
+def df_from_orders(data: Any) -> pd.DataFrame:
     rows = []
-    for it in data or []:
+    for it in _as_list(data):
+        if not isinstance(it, dict):
+            continue
         fp = it.get("fillPrice") or it.get("averagePrice")
         if isinstance(fp, dict):
             fp = fp.get("value")
         rows.append({
-            "submittedAt": pd.to_datetime(it.get("submittedAt") or it.get("placedAt"), utc=True),
-            "ticker": it.get("ticker"), "side": it.get("side"),
-            "quantity": _as_float(it.get("quantity")), "avgFillPrice": _as_float(fp),
-            "status": it.get("status"), "id": it.get("id"),
+            "submittedAt": pd.to_datetime(it.get("submittedAt") or it.get("placedAt"), utc=True, errors="coerce"),
+            "ticker": it.get("ticker"),
+            "side": it.get("side"),
+            "quantity": _as_float(it.get("quantity")),
+            "avgFillPrice": _as_float(fp),
+            "status": it.get("status"),
+            "id": it.get("id"),
         })
     df = pd.DataFrame(rows)
     return df.sort_values("submittedAt") if not df.empty else df
@@ -247,7 +294,7 @@ def guess_yahoo_symbol(row: pd.Series) -> Optional[str]:
         return base + ".L"
     return base or None
 
-def fetch_price_history(y_symbols: list[str], start: str, end: str) -> pd.DataFrame:
+def fetch_price_history(y_symbols: List[str], start: str, end: str) -> pd.DataFrame:
     if yf is None or not y_symbols:
         return pd.DataFrame()
     df = yf.download(y_symbols, start=start, end=end, group_by="ticker", progress=False)["Adj Close"]
@@ -258,7 +305,7 @@ def fetch_price_history(y_symbols: list[str], start: str, end: str) -> pd.DataFr
 # ---------------------------- sidebar ----------------------------
 with st.sidebar:
     st.header("Settings")
-    default_key = st.secrets.get("T212_API_KEY", "")
+    default_key = st.secrets.get("T212_API_KEY", os.environ.get("T212_API_KEY", ""))
     api_key = st.text_input("Trading 212 API key", type="password", value=default_key)
     mode = st.radio("Mode", ["live", "demo"], horizontal=True)
     risk_free = st.number_input("Risk-free rate (annual, %)", 0.0, 10.0, 0.0, step=0.25) / 100.0
@@ -275,7 +322,7 @@ if not api_key:
 cfg = T212Config(mode=mode, api_key=api_key)
 client = T212Client(cfg)
 
-# ---------------------------- cached fetch (fix: underscore param) ----------------------------
+# ---------------------------- cached fetch (hash-safe) ----------------------------
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_all(_client: T212Client):
     cash = _client.get_account_cash()
@@ -296,12 +343,12 @@ except Exception as e:
 
 # ---------------------------- processing ----------------------------
 account_ccy = (cash_raw or {}).get("currencyCode") or "EUR"
-cash_val = _as_float(_safe_get(cash_raw, "cash", "value") or cash_raw.get("cash") or 0.0)
+cash_val = _as_float(_safe_get(cash_raw, "cash", "value") or (cash_raw or {}).get("cash") or 0.0)
 
-df_pos = df_from_positions(positions_raw or [])
-df_div = df_from_dividends(dividends_raw or [])
-df_txs = df_from_transactions(txs_raw or [])
-df_ord = df_from_orders(orders_raw or [])
+df_pos = df_from_positions(positions_raw)
+df_div = df_from_dividends(dividends_raw)
+df_txs = df_from_transactions(txs_raw)
+df_ord = df_from_orders(orders_raw)
 
 df_pos["value_native"] = df_pos.get("current_value_native", pd.Series(dtype=float)).fillna(0.0)
 nav_positions = float(df_pos["value_native"].sum()) if not df_pos.empty else 0.0
@@ -310,7 +357,7 @@ nav_total = nav_positions + (cash_val or 0.0)
 # XIRR from cashflows (treat positive amounts as inflows; add terminal -NAV)
 cf = []
 for _, r in (df_txs or pd.DataFrame()).iterrows():
-    if pd.isna(r["date"]) or pd.isna(r["amount"]):
+    if pd.isna(r.get("date")) or pd.isna(r.get("amount")):
         continue
     cf.append((r["date"], r["amount"]))
 cf.append((now_utc(), -nav_total))
@@ -321,7 +368,7 @@ if not df_div.empty:
     last12 = df_div[df_div["paidOn"] >= (now_utc() - pd.DateOffset(years=1))]
     ttm_div = float(last12["amount"].sum())
     dmon = df_div.copy()
-    dmon["month"] = dmon["paidOn"].dt.to_period("M").dt.to_timestamp()
+    dmon["month"] = pd.to_datetime(dmon["paidOn"]).dt.to_period("M").dt.to_timestamp()
     div_by_month = dmon.groupby("month")["amount"].sum()
 else:
     ttm_div = 0.0
@@ -329,7 +376,7 @@ else:
 
 # Allocation view
 alloc = df_pos.copy()
-if not alloc.empty and nav_total:
+if not alloc.empty and nav_total > 0:
     alloc["weight"] = alloc["value_native"] / nav_total
     alloc_view = alloc[["ticker", "name", "value_native", "weight"]].sort_values("weight", ascending=False)
 else:
@@ -357,7 +404,7 @@ if enable_prices and yf is not None:
     start = (now_utc() - pd.DateOffset(years=lookback_years)).strftime("%Y-%m-%d")
     end = (now_utc() + pd.DateOffset(days=1)).strftime("%Y-%m-%d")
 
-    manual_map = {}
+    manual_map: Dict[str, str] = {}
     if mapping_text.strip():
         for line in mapping_text.splitlines():
             if "," in line:
@@ -421,3 +468,4 @@ with t4:
 
 with t5:
     st.json(pies_raw or {})
+    
