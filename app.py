@@ -233,17 +233,32 @@ try:
         if not cash_data:
             st.error("Failed to fetch cash balance. Please check your API key and try again.")
             st.stop()
+            
+        # Debug: Log the entire cash_data structure
+        logger.info(f"Cash data structure: {cash_data}")
+        for key, value in cash_data.items():
+            logger.info(f"Key: {key}, Type: {type(value).__name__}, Value: {value}")
                 
         # Get all cash values in CZK
         # The API might return values as direct numbers or as {'value': number} objects
         def get_cash_value(data, key):
-            value = data.get(key, 0)
-            if isinstance(value, dict) and 'value' in value:
-                return _as_float(value['value'])
-            return _as_float(value)
+            try:
+                value = data.get(key, 0)
+                logger.info(f"Processing key '{key}': {value} (type: {type(value).__name__})")
+                if isinstance(value, dict):
+                    if 'value' in value:
+                        return _as_float(value['value'])
+                    logger.warning(f"Dictionary without 'value' key for {key}: {value}")
+                    return 0.0
+                return _as_float(value)
+            except Exception as e:
+                logger.error(f"Error processing {key}: {str(e)}")
+                logger.error(traceback.format_exc())
+                return 0.0
             
         cash_balance = convert_to_czk(get_cash_value(cash_data, "free"), 'CZK')
         pie_cash = convert_to_czk(get_cash_value(cash_data, "pieCash"), 'CZK')
+        logger.info(f"Calculated cash_balance: {cash_balance}, pie_cash: {pie_cash}")
         
         # Get positions
         positions = client.get_positions()
