@@ -151,12 +151,17 @@ try:
                 # Handle different response formats
                 if isinstance(cash_data, dict):
                     # Try different possible response formats
-                    cash_balance = _as_float(cash_data.get("free", {}).get("value") or 
-                                          cash_data.get("cash", {}).get("value") or 
-                                          cash_data.get("balance") or
-                                          (next((v for v in cash_data.values() if isinstance(v, (int, float))), 0)))
+                    cash_balance = _as_float(
+                        cash_data.get("free", {}).get("value", 
+                        cash_data.get("cash", {}).get("value", 
+                        cash_data.get("balance", 
+                        next((v for v in cash_data.values() if isinstance(v, (int, float))), 0)
+                    ))))
                 else:
+                    # If it's already a number, use it directly
                     cash_balance = _as_float(cash_data)
+                    
+                logger.info(f"Parsed cash balance: {cash_balance}")
                 
                 st.sidebar.success(f"✅ Cash balance: {cash_balance:.2f}")
                 
