@@ -5,8 +5,9 @@ import os
 import time
 import requests
 import pandas as pd
+import numpy as np
 import streamlit as st
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 # ---------------------------- UI setup ----------------------------
 st.set_page_config(page_title="Trading 212 Portfolio", layout="wide")
