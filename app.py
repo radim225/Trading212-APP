@@ -157,20 +157,34 @@ try:
                 # Log the raw response for debugging
                 logger.debug(f"Cash balance raw response: {cash_data}")
                 
-                # Handle different response formats
-                if isinstance(cash_data, dict):
-                    # Try different possible response formats
-                    cash_balance = _as_float(
-                        cash_data.get("free", {}).get("value", 
-                        cash_data.get("cash", {}).get("value", 
-                        cash_data.get("balance", 
-                        next((v for v in cash_data.values() if isinstance(v, (int, float))), 0)
-                    ))))
-                else:
-                    # If it's already a number, use it directly
-                    cash_balance = _as_float(cash_data)
+                # Simple conversion to float
+                try:
+                    if isinstance(cash_data, (int, float)):
+                        cash_balance = float(cash_data)
+                    elif isinstance(cash_data, dict):
+                        # If it's a dict, just take the first numeric value we find
+                        for v in cash_data.values():
+                            if isinstance(v, (int, float)):
+                                cash_balance = float(v)
+                                break
+                        else:
+                            # If no numeric value found, try to convert the first value to float
+                            if cash_data:
+                                cash_balance = float(next(iter(cash_data.values())))
+                            else:
+                                cash_balance = 0.0
+                    else:
+                        # For any other type, try direct conversion
+                        cash_balance = float(cash_data)
+                        
+                    logger.info(f"Parsed cash balance: {cash_balance}")
                     
-                logger.info(f"Parsed cash balance: {cash_balance}")
+                except Exception as e:
+                    logger.error(f"Error parsing cash balance: {e}")
+                    logger.error(f"Cash data type: {type(cash_data).__name__}")
+                    logger.error(f"Cash data value: {cash_data}")
+                    st.error("Could not determine cash balance. Using 0.0 as default.")
+                    cash_balance = 0.0
                 
                 st.sidebar.success(f"✅ Cash balance: {cash_balance:.2f}")
                 
