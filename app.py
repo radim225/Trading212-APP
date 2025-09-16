@@ -145,6 +145,15 @@ try:
                 with st.sidebar.expander("Raw Cash Balance Response"):
                     st.json(cash_data if cash_data is not None else "No data returned")
                     
+                # Log detailed information about the response
+                logger.info(f"Cash balance response type: {type(cash_data).__name__}")
+                if isinstance(cash_data, dict):
+                    logger.info(f"Cash balance response keys: {list(cash_data.keys())}")
+                    for k, v in cash_data.items():
+                        logger.info(f"  {k}: {v} (type: {type(v).__name__})")
+                else:
+                    logger.info(f"Cash balance value: {cash_data}")
+                
                 # Log the raw response for debugging
                 logger.debug(f"Cash balance raw response: {cash_data}")
                 
