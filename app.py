@@ -247,6 +247,13 @@ try:
             st.stop()
             
         positions = positions or []
+        logger.info(f"Processing {len(positions)} positions")
+        
+        # Debug: Log first position if available
+        if positions:
+            logger.info(f"First position structure: {positions[0]}")
+            for key, value in positions[0].items():
+                logger.info(f"Position key: {key}, Type: {type(value).__name__}")
         
         # Process positions
         holdings = []
