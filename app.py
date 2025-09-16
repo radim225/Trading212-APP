@@ -6,7 +6,57 @@ import requests
 import json
 import logging
 import traceback
-from typing import Dict, List, Any, Optional
+import time
+from typing import Dict, List, Any, Optional, Tuple
+
+# Cache for company names to avoid repeated API calls
+COMPANY_NAMES_CACHE = {}
+
+def get_company_name(ticker: str) -> str:
+    """
+    Get company name from cache, Trading212 API, or fallback to a financial data API.
+    Returns the ticker if no name is found.
+    """
+    if not ticker or ticker == "Unknown":
+        return ticker
+        
+    # Clean the ticker (remove exchange suffixes like .LON, .FRA, etc.)
+    base_ticker = ticker.split('.')[0].upper()
+    
+    # Check cache first
+    if base_ticker in COMPANY_NAMES_CACHE:
+        return COMPANY_NAMES_CACHE[base_ticker]
+    
+    try:
+        # Try to get from Trading212 API first
+        url = f"https://live.trading212.com/api/v0/equity/metadata/instruments/{base_ticker}"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if 'name' in data:
+                COMPANY_NAMES_CACHE[base_ticker] = data['name']
+                return data['name']
+    except Exception as e:
+        logger.debug(f"Couldn't fetch name from Trading212 for {base_ticker}: {str(e)}")
+    
+    # Fallback to Yahoo Finance (if Trading212 fails)
+    try:
+        yahoo_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={base_ticker}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(yahoo_url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if 'quotes' in data and len(data['quotes']) > 0:
+                name = data['quotes'][0].get('longname') or data['quotes'][0].get('shortname')
+                if name:
+                    COMPANY_NAMES_CACHE[base_ticker] = name
+                    return name
+    except Exception as e:
+        logger.debug(f"Couldn't fetch name from Yahoo Finance for {base_ticker}: {str(e)}")
+    
+    # If all else fails, return the ticker and cache it to avoid repeated lookups
+    COMPANY_NAMES_CACHE[base_ticker] = base_ticker
+    return base_ticker
 
 # Configure logging to stderr (will be captured in Streamlit logs)
 logging.basicConfig(
@@ -236,7 +286,8 @@ try:
             try:
                 # Safely get position data with defaults
                 ticker = pos.get("ticker", "Unknown")
-                name = pos.get("name", ticker)
+                # Use the full company name from our mapping
+                name = get_company_name(ticker)
                 
                 # Handle quantity - could be in different formats
                 quantity_data = pos.get("quantity", 0)
@@ -298,14 +349,21 @@ try:
             # Display the table
             st.dataframe(df_holdings, use_container_width=True)
         
-        # Display summary
+        # Calculate portfolio metrics
+        portfolio_total = total_value + cash_balance
+        
+        # Display summary with proper formatting
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Total Portfolio Value (CZK)", f"{total_value:,.2f}")
+            st.metric("Invested Value (CZK)", f"{total_value:,.2f}")
         with col2:
             st.metric("Cash Balance (CZK)", f"{cash_balance:,.2f}")
         with col3:
-            st.metric("Total Value (CZK)", f"{total_value + cash_balance:,.2f}")
+            st.metric("Total Portfolio Value (CZK)", f"{portfolio_total:,.2f}")
+            
+        # Add some spacing
+        st.write("")
+        st.write("### Portfolio Holdings")
         
         # Display holdings table
         st.subheader("Current Holdings")
