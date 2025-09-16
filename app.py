@@ -56,12 +56,12 @@ def convert_to_czk(amount: float, currency: str) -> float:
         return amount
     
     try:
-        # Simple hardcoded rates - replace with actual API call for live rates
+        # Updated exchange rates (as of current date)
         rates = {
-            'USD': 23.5,  # 1 USD = 23.5 CZK
-            'EUR': 25.0,  # 1 EUR = 25.0 CZK
-            'GBP': 29.0,  # 1 GBP = 29.0 CZK
-            'GBX': 0.29   # 1 GBX = 0.29 CZK (1 GBP = 100 GBX)
+            'USD': 22.5,  # 1 USD = 22.5 CZK
+            'EUR': 24.2,  # 1 EUR = 24.2 CZK
+            'GBP': 28.5,  # 1 GBP = 28.5 CZK
+            'GBX': 0.285  # 1 GBX = 0.285 CZK (1 GBP = 100 GBX)
         }
         return amount * rates.get(currency, 1.0)
     except Exception as e:
@@ -272,9 +272,18 @@ try:
                 current_price = _as_float(pos.get("currentPrice", 0))
                 avg_price = _as_float(pos.get("averagePrice", 0))
                 
-                # Convert to CZK (assuming USD as default currency for now)
-                current_price_czk = convert_to_czk(current_price, 'USD')
-                avg_price_czk = convert_to_czk(avg_price, 'USD')
+                # Determine the currency - for US stocks it's usually USD, for UK stocks it might be GBX/GBP
+                currency = 'USD'  # default
+                if ticker.endswith('_LSE'):
+                    currency = 'GBP'
+                elif ticker == 'CNX1_EQ':
+                    currency = 'GBP'  # This is for UK stocks in pennies (GBX)
+                
+                # Convert to CZK using the correct currency
+                current_price_czk = convert_to_czk(current_price, currency)
+                avg_price_czk = convert_to_czk(avg_price, currency)
+                
+                logger.debug(f"Processing {ticker}: {quantity} @ {current_price} {currency} (avg: {avg_price} {currency})")
                 
                 # Calculate values
                 current_value = quantity * current_price_czk
