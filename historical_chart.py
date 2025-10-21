@@ -149,26 +149,49 @@ def display_historical_section(client, current_positions, cash_data):
     st.markdown("---")
     st.header("📈 Historical Performance")
     
-    # Time period selector
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    with col1:
-        if st.button("1W", key="1w"):
-            period = 7
-    with col2:
-        if st.button("1M", key="1m"):
-            period = 30
-    with col3:
-        if st.button("3M", key="3m"):
-            period = 90
-    with col4:
-        if st.button("6M", key="6m"):
-            period = 180
-    with col5:
-        if st.button("1Y", key="1y"):
-            period = 365
-    with col6:
-        if st.button("ALL", key="all"):
-            period = None
+    # Info box explaining limitations
+    with st.expander("ℹ️ About Historical Data"):
+        st.markdown("""
+        **Current Limitations:**
+        - Trading212 API doesn't provide daily portfolio snapshots
+        - We can show order history but not actual daily portfolio values
+        - Historical prices and FX rates aren't available via API
+        
+        **What you're seeing:**
+        - Cumulative invested amount over time
+        - Current total return based on today's values
+        - Historical orders and transactions
+        
+        **For detailed historical portfolio value:**
+        1. Use Trading212's CSV export feature in the app
+        2. Download historical data with actual daily values
+        3. Upload it here for analysis (future feature)
+        
+        **Alternatively:** We can estimate using external price APIs (less accurate for FX impact)
+        """)
+    
+    # CSV Upload option
+    st.subheader("📤 Upload Historical Data")
+    uploaded_file = st.file_uploader(
+        "Upload Trading212 CSV export for accurate historical portfolio values",
+        type=['csv'],
+        help="Download from Trading212 app: Account → Reports → Export"
+    )
+    
+    if uploaded_file is not None:
+        try:
+            # Read CSV
+            csv_df = pd.read_csv(uploaded_file)
+            st.success(f"✅ Loaded {len(csv_df)} records from CSV")
+            
+            # Display preview
+            with st.expander("📋 CSV Preview"):
+                st.dataframe(csv_df.head(10), use_container_width=True)
+            
+            # TODO: Process CSV and create historical value chart
+            st.info("CSV processing coming soon! For now, showing data from API...")
+        except Exception as e:
+            st.error(f"Error reading CSV: {e}")
     
     # Fetch historical data
     with st.spinner("Loading historical data..."):
@@ -208,7 +231,12 @@ def display_historical_section(client, current_positions, cash_data):
                     first_order_date = orders_df['date'].min().strftime('%Y-%m-%d')
                     st.metric("Since", first_order_date)
             with col4:
-                days_active = (datetime.now() - orders_df['date'].min()).days if len(orders_df) > 0 else 0
+                if len(orders_df) > 0:
+                    # Make datetime timezone-aware to match pandas timestamps
+                    now = pd.Timestamp.now(tz=orders_df['date'].min().tz)
+                    days_active = (now - orders_df['date'].min()).days
+                else:
+                    days_active = 0
                 st.metric("Days Active", f"{days_active:,}")
             
             # Calculate historical portfolio value
