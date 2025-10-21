@@ -1,15 +1,101 @@
 import os
+import sys
 import streamlit as st
 import pandas as pd
 import requests
+import json
 import logging
 import traceback
 import time
-from typing import Dict, Any, List, Optional, Tuple
-from datetime import datetime
+from typing import Dict, List, Any, Optional, Tuple
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Cache for company names to avoid repeated API calls
+COMPANY_NAMES_CACHE = {}
+
+def parse_t212_ticker(ticker: str) -> Tuple[str, str]:
+    """
+    Parse Trading212's ticker format to extract the clean ticker and exchange.
+    Examples:
+        'AAPL_US_EQ' -> ('AAPL', 'US')
+        'CNX1_EQ' -> ('CNX1', 'LON')
+        'MSFT_US_EQ' -> ('MSFT', 'US')
+    """
+    if not ticker:
+        return ticker, 'Unknown'
+    
+    # Trading212 format: TICKER_EXCHANGE_EQ or TICKER_EQ
+    parts = ticker.split('_')
+    
+    if len(parts) >= 2:
+        clean_ticker = parts[0]
+        exchange = parts[1] if parts[1] != 'EQ' else 'LON'  # Default to London if no exchange specified
+        return clean_ticker, exchange
+    
+    return ticker, 'Unknown'
+
+def get_company_name(ticker: str, api_key: str = None, is_demo: bool = False) -> str:
+    """
+    Get company name using Trading212 metadata API.
+    Returns the ticker if no name is found.
+    """
+    if not ticker or ticker == "Unknown":
+        return ticker
+    
+    # Parse the T212 ticker format
+    clean_ticker, exchange = parse_t212_ticker(ticker)
+    
+    # Check cache first
+    if ticker in COMPANY_NAMES_CACHE:
+        return COMPANY_NAMES_CACHE[ticker]
+    
+    # Try to get from Trading212 metadata API using the original ticker format
+    try:
+        base_url = "https://demo.trading212.com/api/v0" if is_demo else "https://live.trading212.com/api/v0"
+        url = f"{base_url}/equity/metadata/instruments"
+        headers = {}
+        if api_key:
+            headers["Authorization"] = api_key
+        
+        # Search for the instrument
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            instruments = response.json()
+            # Find matching instrument
+            for instrument in instruments:
+                if instrument.get('ticker') == ticker:
+                    name = instrument.get('name', ticker)
+                    COMPANY_NAMES_CACHE[ticker] = name
+                    logger.info(f"Found company name for {ticker}: {name}")
+                    return name
+    except Exception as e:
+        logger.debug(f"Couldn't fetch name from Trading212 metadata for {ticker}: {str(e)}")
+    
+    # Fallback to Yahoo Finance using clean ticker
+    try:
+        yahoo_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={clean_ticker}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(yahoo_url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if 'quotes' in data and len(data['quotes']) > 0:
+                name = data['quotes'][0].get('longname') or data['quotes'][0].get('shortname')
+                if name:
+                    COMPANY_NAMES_CACHE[ticker] = name
+                    logger.info(f"Found company name via Yahoo for {ticker}: {name}")
+                    return name
+    except Exception as e:
+        logger.debug(f"Couldn't fetch name from Yahoo Finance for {clean_ticker}: {str(e)}")
+    
+    # If all else fails, return the clean ticker and cache it
+    COMPANY_NAMES_CACHE[ticker] = clean_ticker
+    return clean_ticker
+
+# Configure logging to stderr (will be captured in Streamlit logs)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    stream=sys.stderr
+)
 logger = logging.getLogger(__name__)
 
 # ---------------------------- UI Setup ----------------------------
@@ -19,15 +105,12 @@ st.caption("View your current holdings and portfolio value")
 
 # ---------------------------- Helper Functions ----------------------------
 def _as_float(x, default: float = 0.0) -> float:
-    """Safely convert value to float, handling nested dictionaries."""
+    """Convert various data types to float, including nested dicts."""
     try:
-        if x is None:
-            return default
-        if isinstance(x, dict):
-            # If it's a dictionary, try to get 'value' key
-            x = x.get('value', default)
-        return float(x)
-    except (ValueError, TypeError, AttributeError):
+        if isinstance(x, dict) and 'value' in x:
+            return float(x['value'])
+        return float(x) if x is not None else default
+    except (ValueError, TypeError):
         return default
 
 def _as_list(obj: Any) -> List[Dict[str, Any]]:
@@ -41,287 +124,268 @@ def _as_list(obj: Any) -> List[Dict[str, Any]]:
                 return obj[k]
     return []
 
-def get_company_name(ticker: str) -> str:
-    """Map tickers to company names."""
-    name_map = {
-        'RSG_US_EQ': 'Republic Services',
-        'CNX1_EQ': 'Centrica PLC (in GBX)',
-        # Add more ticker to name mappings as needed
-    }
-    return name_map.get(ticker, ticker)
-
-def convert_to_czk(amount: float, currency: str) -> float:
-    """Convert amount to CZK using current exchange rates."""
-    if currency == 'CZK':
-        return amount
-    
-    try:
-        # Updated exchange rates (as of current date)
-        rates = {
-            'USD': 22.5,  # 1 USD = 22.5 CZK
-            'EUR': 24.2,  # 1 EUR = 24.2 CZK
-            'GBP': 28.5,  # 1 GBP = 28.5 CZK
-            'GBX': 0.285  # 1 GBX = 0.285 CZK (1 GBP = 100 GBX)
-        }
-        return amount * rates.get(currency, 1.0)
-    except Exception as e:
-        logger.error(f"Error converting {amount} {currency} to CZK: {str(e)}")
-        return amount  # Return original amount if conversion fails
-
 # ---------------------------- Trading 212 Client ----------------------------
 class T212Client:
     def __init__(self, api_key: str, is_demo: bool = False):
-        self.api_key = api_key
-        self.base_url = "https://live.trading212.com/api/v0" if not is_demo else "https://demo.trading212.com/api/v0"
-        self.last_request_time = 0
-        self.min_request_interval = 1.0  # Start with 1 second between requests
-        self.rate_limit_reset = 0
-        
-        # Configure session
         self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": self.api_key,
-            "User-Agent": "Trading212-Portfolio-App/1.0"
-        })
-
-    def _rate_limit(self):
-        """Enforce rate limiting between requests."""
-        now = time.time()
-        time_since_last = now - self.last_request_time
-        
-        if time_since_last < self.min_request_interval:
-            sleep_time = self.min_request_interval - time_since_last
-            logger.debug(f"Rate limiting: sleeping for {sleep_time:.2f}s")
-            time.sleep(sleep_time)
-            
-        self.last_request_time = time.time()
-
-    def _handle_rate_limit(self, response):
-        """Handle rate limit headers and update rate limiting parameters."""
-        if 'X-RateLimit-Remaining' in response.headers and 'X-RateLimit-Reset' in response.headers:
-            remaining = int(response.headers['X-RateLimit-Remaining'])
-            reset_time = int(response.headers['X-RateLimit-Reset'])
-            
-            if remaining < 5:  # If we're getting close to the limit
-                self.min_request_interval = 2.0  # Slow down
-            elif remaining < 10:
-                self.min_request_interval = 1.0
-            else:
-                self.min_request_interval = 0.5
-                
-            logger.debug(f"Rate limit: {remaining} requests remaining, reset at {reset_time}")
-
-    def _get(self, endpoint: str) -> Any:
-        """Make a GET request with rate limiting and error handling."""
-        url = f"{self.base_url}{endpoint}"
-        logger.info(f"Making request to: {url}")
-        
-        # Enforce rate limiting
-        self._rate_limit()
-        
+        self.session.headers.update({"Authorization": api_key})
+        self.base = (
+            "https://demo.trading212.com/api/v0" if is_demo 
+            else "https://live.trading212.com/api/v0"
+        )
+        self.last_response = None
+    
+    def _get(self, endpoint: str):
+        url = f"{self.base}{endpoint}"
         try:
-            response = self.session.get(url, timeout=15)
-            logger.info(f"Status Code: {response.status_code}")
+            logger.info(f"Making request to: {url}")
+            self.last_response = self.session.get(url, timeout=30)
             
-            # Handle rate limiting
-            self._handle_rate_limit(response)
+            # Log request details
+            logger.info(f"Status Code: {self.last_response.status_code}")
+            logger.debug("Response Headers:")
+            for k, v in self.last_response.headers.items():
+                logger.debug(f"  {k}: {v}")
             
-            if response.status_code == 200:
-                return response.json()
-            elif response.status_code == 429:  # Too Many Requests
-                retry_after = int(response.headers.get('Retry-After', 5))
-                logger.warning(f"Rate limited. Waiting {retry_after} seconds before retry...")
-                time.sleep(retry_after)
-                return self._get(endpoint)  # Retry once
-            else:
-                logger.error(f"Error {response.status_code}: {response.text}")
-                return None
+            # Try to parse JSON
+            try:
+                data = self.last_response.json()
+                logger.debug(f"Response JSON: {json.dumps(data, indent=2)}")
+                return data
+            except ValueError as e:
+                logger.warning(f"Failed to parse JSON response: {e}")
+                logger.debug(f"Raw response: {self.last_response.text}")
+                return self.last_response.text
                 
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             logger.error(f"Request failed: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+        except Exception as e:
+            st.error(f"Error fetching {endpoint}: {str(e)}")
             return None
     
     def get_cash_balance(self) -> Dict[str, Any]:
-        """Fetch cash balance with retry logic and rate limiting."""
-        max_retries = 3
-        retry_delay = 5  # seconds
-        
-        for attempt in range(max_retries):
-            logger.info(f"Fetching cash balance (attempt {attempt + 1}/{max_retries})...")
-            data = self._get("/equity/account/cash")
-            
-            if data is not None:
-                if isinstance(data, dict):
-                    logger.info(f"Cash balance response type: {type(data).__name__}")
-                    logger.info(f"Cash balance response keys: {list(data.keys())}")
-                    for key, value in data.items():
-                        try:
-                            logger.debug(f"  {key}: {value} (type: {type(value).__name__})")
-                        except Exception as e:
-                            logger.error(f"Error logging {key}: {str(e)}")
-                    return data
-                else:
-                    logger.warning(f"Unexpected response type: {type(data).__name__}")
-            
-            if attempt < max_retries - 1:
-                logger.warning(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-        
-        logger.error("Failed to fetch cash balance after multiple attempts")
-        return {}
+        return self._get("/equity/account/cash")
     
     def get_positions(self) -> List[Dict[str, Any]]:
-        """Fetch portfolio positions with retry logic and rate limiting."""
-        max_retries = 3
-        retry_delay = 5  # seconds
-        
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Fetching positions (attempt {attempt + 1}/{max_retries})...")
-                data = self._get("/equity/portfolio")
-                
-                if data is not None:
-                    if isinstance(data, list):
-                        logger.info(f"Found {len(data)} positions")
-                        if data:
-                            logger.debug(f"First position: {data[0]}")
-                        return data
-                    else:
-                        logger.warning(f"Unexpected response type: {type(data).__name__}")
-                
-                if attempt < max_retries - 1:
-                    logger.warning(f"Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
-                
-            except Exception as e:
-                logger.error(f"Error in get_positions: {str(e)}")
-                logger.error(traceback.format_exc())
-                if attempt == max_retries - 1:
-                    return []
-                
-                logger.warning(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
-        
-        logger.error("Failed to fetch positions after multiple attempts")
-        return []
+        return self._get("/equity/portfolio")
     
     def get_account_info(self) -> Dict[str, Any]:
         return self._get("/equity/account/info")
+    
+    def get_metadata_instruments(self) -> List[Dict[str, Any]]:
+        """Get list of all available instruments with metadata."""
+        return self._get("/equity/metadata/instruments")
 
 # ---------------------------- Main App ----------------------------
 # Sidebar
 with st.sidebar:
     st.header("Settings")
     default_key = st.secrets.get("T212_API_KEY", os.environ.get("T212_API_KEY", ""))
-    api_key = st.text_input("Trading 212 API key", type="password", value=default_key)
-    is_demo = st.checkbox("Use Demo Account", value=False)
     
-    if not api_key:
-        st.warning("Please enter your Trading 212 API key")
-        st.stop()
+    # Add demo mode option
+    use_demo_data = st.checkbox("View sample data (demo mode)", value=False)
+    
+    if not use_demo_data:
+        api_key = st.text_input("Trading 212 API key", type="password", value=default_key)
+        is_demo = st.checkbox("Use Demo Account", value=False)
+        
+        if not api_key:
+            st.warning("Please enter your Trading 212 API key or enable demo mode")
+            st.stop()
+    else:
+        api_key = ""
+        is_demo = False
 
 try:
-    # Initialize client
-    client = T212Client(api_key, is_demo)
-    
-    with st.spinner("Fetching portfolio data..."):
-        # Get cash balance
-        cash_data = client.get_cash_balance()
-        if not cash_data:
-            st.error("Failed to fetch cash balance. Please check your API key and try again.")
-            st.stop()
+    if use_demo_data:
+        # Show sample data in demo mode
+        st.info("Viewing sample data in demo mode. No API key required.")
+        
+        # Sample data for demo
+        cash_balance = 1500.75
+        positions = [
+            {"ticker": "AAPL", "name": "Apple Inc.", "quantity": 10, "currentPrice": {"value": 175.50}, "averagePrice": 160.25},
+            {"ticker": "MSFT", "name": "Microsoft Corporation", "quantity": 5, "currentPrice": {"value": 300.20}, "averagePrice": 280.75}
+        ]
+    else:
+        # Initialize client with real API
+        client = T212Client(api_key, is_demo)
+        
+        with st.spinner("Fetching portfolio data..."):
+            # Debug: Show request details
+            st.sidebar.write("Debug Info:")
+            st.sidebar.json({
+                "api_key_provided": bool(api_key),
+                "is_demo": is_demo,
+                "base_url": client.base if hasattr(client, 'base') else 'Not initialized'
+            })
             
-        # Get cash values directly as floats
-        cash_balance = convert_to_czk(float(cash_data.get("free", 0)), 'CZK')
-        pie_cash = convert_to_czk(float(cash_data.get("pieCash", 0)), 'CZK')
-        
-        logger.info(f"Cash balance: {cash_balance} CZK, PIE Cash: {pie_cash} CZK")
-        
-        # Get positions
-        positions = client.get_positions()
-        if positions is None:
-            st.error("Failed to fetch positions. Please try again later.")
-            st.stop()
+            # Get cash balance with error handling
+            try:
+                st.sidebar.write("⏳ Fetching cash balance...")
+                logger.info("Fetching cash balance...")
+                
+                cash_data = client.get_cash_balance()
+                logger.info(f"Cash balance response type: {type(cash_data).__name__}")
+                
+                # Show raw response in debug
+                with st.sidebar.expander("Raw Cash Balance Response"):
+                    st.json(cash_data if cash_data is not None else "No data returned")
+                    
+                # Log detailed information about the response
+                logger.info(f"Cash balance response type: {type(cash_data).__name__}")
+                if isinstance(cash_data, dict):
+                    logger.info(f"Cash balance response keys: {list(cash_data.keys())}")
+                    for k, v in cash_data.items():
+                        logger.info(f"  {k}: {v} (type: {type(v).__name__})")
+                else:
+                    logger.info(f"Cash balance value: {cash_data}")
+                
+                # Log the raw response for debugging
+                logger.debug(f"Cash balance raw response: {cash_data}")
+                
+                # Simple conversion to float
+                try:
+                    if isinstance(cash_data, (int, float)):
+                        cash_balance = float(cash_data)
+                    elif isinstance(cash_data, dict):
+                        # If it's a dict, just take the first numeric value we find
+                        for v in cash_data.values():
+                            if isinstance(v, (int, float)):
+                                cash_balance = float(v)
+                                break
+                        else:
+                            # If no numeric value found, try to convert the first value to float
+                            if cash_data:
+                                cash_balance = float(next(iter(cash_data.values())))
+                            else:
+                                cash_balance = 0.0
+                    else:
+                        # For any other type, try direct conversion
+                        cash_balance = float(cash_data)
+                        
+                    logger.info(f"Parsed cash balance: {cash_balance}")
+                    
+                except Exception as e:
+                    logger.error(f"Error parsing cash balance: {e}")
+                    logger.error(f"Cash data type: {type(cash_data).__name__}")
+                    logger.error(f"Cash data value: {cash_data}")
+                    st.error("Could not determine cash balance. Using 0.0 as default.")
+                    cash_balance = 0.0
+                
+                st.sidebar.success(f"✅ Cash balance: {cash_balance:.2f}")
+                
+            except Exception as e:
+                error_msg = f"❌ Error fetching cash balance: {str(e)}"
+                logger.error(error_msg)
+                logger.error(traceback.format_exc())
+                st.sidebar.error(error_msg)
+                st.error("Failed to fetch cash balance. Please check your API key and try again.")
+                st.stop()
             
-        positions = positions or []
-        logger.info(f"Processing {len(positions)} positions")
+            # Get positions with error handling
+            try:
+                st.sidebar.write("⏳ Fetching positions...")
+                positions = client.get_positions()
+                
+                # Log the raw positions data for debugging
+                logger.info(f"Positions data type: {type(positions).__name__}")
+                if isinstance(positions, list):
+                    logger.info(f"Found {len(positions)} positions")
+                    if positions:
+                        logger.info(f"First position: {positions[0]}")
+                else:
+                    logger.info(f"Unexpected positions format: {positions}")
+                
+                # Ensure positions is a list
+                if not isinstance(positions, list):
+                    positions = []
+                    logger.warning("Positions data is not a list, using empty list")
+                
+                st.sidebar.success(f"✅ Found {len(positions)} positions")
+                
+                # Show raw positions in debug
+                with st.sidebar.expander("Raw Positions Response"):
+                    st.json(positions if positions else "No positions found")
+                
+            except Exception as e:
+                logger.error(f"Error fetching positions: {str(e)}")
+                logger.error(traceback.format_exc())
+                st.sidebar.error(f"❌ Error fetching positions: {str(e)}")
+                st.error("Failed to fetch positions. Some data may be missing.")
+                positions = []
         
-        # Debug: Log first position if available
-        if positions:
-            logger.info(f"First position structure: {positions[0]}")
-            for key, value in positions[0].items():
-                logger.info(f"Position key: {key}, Type: {type(value).__name__}")
-        
-        # Process positions
+        # Process positions with error handling
         holdings = []
-        total_invested = 0
-        total_current_value = 0
+        total_value = 0
+        
+        # Get the total invested amount from the cash balance response
+        total_invested = _as_float(cash_data.get('invested', 0))
         
         for pos in positions:
             try:
-                ticker = pos.get("ticker")
-                if not ticker:
-                    logger.warning(f"Skipping position with no ticker: {pos}")
-                    continue
-                    
-                name = get_company_name(ticker)
-                quantity = _as_float(pos.get("quantity", 0))
-                current_price = _as_float(pos.get("currentPrice", 0))
-                avg_price = _as_float(pos.get("averagePrice", 0))
+                # Debug: Log the position data structure
+                logger.debug(f"Processing position: {json.dumps(pos, indent=2)}")
                 
-                # Determine the currency - for US stocks it's usually USD, for UK stocks it might be GBX/GBP
-                currency = 'USD'  # default
-                if ticker.endswith('_LSE'):
-                    currency = 'GBP'
-                elif ticker == 'CNX1_EQ':
-                    currency = 'GBP'  # This is for UK stocks in pennies (GBX)
+                # Get ticker and parse it
+                ticker = pos.get("ticker", "Unknown")
+                clean_ticker, exchange = parse_t212_ticker(ticker)
                 
-                # Convert to CZK using the correct currency
-                current_price_czk = convert_to_czk(current_price, currency)
-                avg_price_czk = convert_to_czk(avg_price, currency)
+                # Get the company name
+                name = get_company_name(ticker, api_key, is_demo)
+                logger.debug(f"Resolved ticker {ticker} ({clean_ticker}) to name: {name}")
                 
-                logger.debug(f"Processing {ticker}: {quantity} @ {current_price} {currency} (avg: {avg_price} {currency})")
+                # Get quantity
+                quantity = _as_float(pos.get("quantity"))
                 
-                # Calculate values
-                current_value = quantity * current_price_czk
-                invested = quantity * avg_price_czk
+                # Get prices (already in CZK from the API)
+                current_price = _as_float(pos.get("currentPrice"))
+                average_price = _as_float(pos.get("averagePrice"))
                 
-                # Calculate P&L
-                pnl = current_value - invested
-                pnl_pct = (pnl / invested * 100) if invested else 0
+                # Get P&L values from API (these already account for FX impact)
+                ppl = _as_float(pos.get("ppl"))  # Profit/Loss in CZK
+                fx_ppl = _as_float(pos.get("fxPpl"))  # FX Impact in CZK
                 
-                # Add to totals
-                total_invested += invested
-                total_current_value += current_value
+                # Calculate values in CZK
+                market_value_czk = quantity * current_price
+                invested_czk = quantity * average_price
+                
+                # Total P&L includes both price movement and FX impact
+                total_pnl_czk = ppl + fx_ppl
+                
+                # P&L percentage
+                pnl_percent = (total_pnl_czk / invested_czk * 100) if invested_czk > 0 else 0
+                
+                total_value += market_value_czk
                 
                 holdings.append({
-                    "Ticker": ticker,
-                    "Name": name,
-                    "Quantity": quantity,
-                    "Current Price (CZK)": current_price_czk,
-                    "Avg. Price (CZK)": avg_price_czk,
-                    "Current Value (CZK)": current_value,
-                    "Invested (CZK)": invested,
-                    "P&L (CZK)": pnl,
-                    "P&L (%)": pnl_pct
+                    "Ticker": clean_ticker,
+                    "Company Name": name,
+                    "Shares": quantity,
+                    "Avg. Cost (CZK)": average_price,
+                    "Current Price (CZK)": current_price,
+                    "Market Value (CZK)": market_value_czk,
+                    "Invested (CZK)": invested_czk,
+                    "P&L (CZK)": total_pnl_czk,
+                    "P&L (%)": pnl_percent
                 })
                 
-                logger.debug(f"Processed position: {ticker} - {quantity} @ {current_price_czk} CZK")
-                
             except Exception as e:
-                logger.error(f"Error processing position: {str(e)}")
-                logger.error(f"Position data: {pos}")
-                logger.error(traceback.format_exc())
-                continue
-            
-        # Calculate totals
-        total_portfolio_value = total_current_value + cash_balance + pie_cash
+                logger.error(f"Error processing position {pos.get('ticker', 'unknown')}: {str(e)}")
+                logger.error(f"Problematic position data: {pos}")
+                continue  # Skip this position but continue with others
         
-        # Display summary
+        # Get PIE cash from cash balance response
+        pie_cash = _as_float(cash_data.get('pieCash', 0))
+        
+        # Display Portfolio Summary
         st.subheader("Portfolio Summary")
+        
+        # Calculate total portfolio value from API
+        total_portfolio_value = _as_float(cash_data.get('total', 0))
+        
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("Total Portfolio Value", f"{total_portfolio_value:,.2f} CZK")
@@ -332,60 +396,63 @@ try:
         with col4:
             st.metric("PIE Cash", f"{pie_cash:,.2f} CZK")
         
-        # Display holdings table
+        st.write("")
         st.subheader("Current Holdings")
         if not holdings:
             st.info("No positions found in your portfolio.")
         else:
             df_holdings = pd.DataFrame(holdings)
             
-            # Sort by current value (descending)
-            df_holdings = df_holdings.sort_values("Current Value (CZK)", ascending=False)
-            
-            # Format numbers
-            format_dict = {
-                'Current Price (CZK)': '{:,.2f}',
-                'Avg. Price (CZK)': '{:,.2f}',
-                'Current Value (CZK)': '{:,.2f}',
-                'Invested (CZK)': '{:,.2f}',
-                'P&L (CZK)': '{:+,.2f}',
-                'P&L (%)': '{:+,.2f}%',
-                'Quantity': '{:,.2f}'
-            }
-            
-            # Apply formatting
-            for col, fmt in format_dict.items():
-                if col in df_holdings.columns:
-                    df_holdings[col] = df_holdings[col].apply(lambda x: fmt.format(x) if pd.notnull(x) else "")
-            
-            # Display the table
+            # Display the dataframe with proper formatting
             st.dataframe(
                 df_holdings,
                 column_config={
-                    "Ticker": "Ticker",
-                    "Name": "Company Name",
-                    "Quantity": "Shares",
-                    "Current Price (CZK)": st.column_config.NumberColumn("Current Price (CZK)"),
-                    "Avg. Price (CZK)": st.column_config.NumberColumn("Avg. Cost (CZK)"),
-                    "Current Value (CZK)": st.column_config.NumberColumn("Market Value (CZK)"),
-                    "Invested (CZK)": st.column_config.NumberColumn("Invested (CZK)"),
-                    "P&L (CZK)": st.column_config.NumberColumn("P&L (CZK)"),
-                    "P&L (%)": st.column_config.NumberColumn("P&L (%)")
+                    "Ticker": st.column_config.TextColumn("Ticker", width="small"),
+                    "Company Name": st.column_config.TextColumn("Company Name", width="large"),
+                    "Shares": st.column_config.NumberColumn("Shares", format="%.2f"),
+                    "Current Price (CZK)": st.column_config.NumberColumn("Current Price (CZK)", format="%.2f"),
+                    "Avg. Cost (CZK)": st.column_config.NumberColumn("Avg. Cost (CZK)", format="%.2f"),
+                    "Market Value (CZK)": st.column_config.NumberColumn("Market Value (CZK)", format="%.2f"),
+                    "Invested (CZK)": st.column_config.NumberColumn("Invested (CZK)", format="%.2f"),
+                    "P&L (CZK)": st.column_config.NumberColumn("P&L (CZK)", format="%.2f"),
+                    "P&L (%)": st.column_config.NumberColumn("P&L (%)", format="%.4f")
                 },
                 hide_index=True,
-                width='stretch',
-                height=min(400, 50 + len(df_holdings) * 35)  # Adjust height based on number of rows
+                width=1400
             )
+            
+            # Show data format explanation
+            with st.expander("📊 Data Format Explanation"):
+                st.markdown("""
+                **Trading212 API Data Structure:**
+                
+                - **Ticker Format**: Trading212 uses internal codes like `AAPL_US_EQ` (Apple, US Exchange) or `CNX1_EQ` (London Exchange by default)
+                - **Clean Ticker**: We parse these to show just the ticker symbol (e.g., `AAPL`, `CNX1`)
+                - **Company Name**: Fetched from Trading212 metadata API or Yahoo Finance
+                - **Prices**: All values are converted to CZK by Trading212 API
+                - **P&L Calculation**: Includes both price movement (`ppl`) and FX impact (`fxPpl`)
+                - **FX Impact**: Currency fluctuations are automatically accounted for by the API
+                
+                **Example Position Data from API:**
+                ```json
+                {
+                  "ticker": "AAPL_US_EQ",
+                  "quantity": 3.19,
+                  "averagePrice": 4623.69,  // in CZK
+                  "currentPrice": 5888.25,  // in CZK
+                  "ppl": 4050.97,           // Price P&L in CZK
+                  "fxPpl": -94.87,          // FX impact in CZK
+                  "initialFillDate": "2024-05-21T16:37:03.000+03:00",
+                  "frontend": "AUTOINVEST"
+                }
+                ```
+                
+                **Total P&L** = Price P&L + FX P&L = 4050.97 + (-94.87) = 3956.10 CZK
+                """)
         
         # Add some spacing at the bottom
         st.markdown("---")
-        st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        st.caption("Note: All values are displayed in CZK. Exchange rates are approximate.")
-
-except Exception as e:
-    st.error(f"An error occurred: {str(e)}")
-    if st.checkbox("Show error details"):
-        st.exception(e)
+        st.caption("Last updated: " + pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 except Exception as e:
     st.error(f"An error occurred: {str(e)}")
