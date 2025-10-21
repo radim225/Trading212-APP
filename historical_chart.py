@@ -14,9 +14,11 @@ import logging
 # Import portfolio reconstruction
 try:
     from portfolio_reconstruction import reconstruct_portfolio_value, get_simplified_approximation
+    from smart_reconstruction import smart_reconstruct_portfolio
 except ImportError:
     reconstruct_portfolio_value = None
     get_simplified_approximation = None
+    smart_reconstruct_portfolio = None
 
 logger = logging.getLogger(__name__)
 
@@ -175,11 +177,12 @@ def display_historical_section(client, current_positions, cash_data):
     # Info box
     with st.expander("ℹ️ About Each Method"):
         st.markdown("""
-        **📊 Simple Approximation:**
+        **📊 Simple Approximation (Smart):**
         - Fast and lightweight
-        - Estimates portfolio value between key dates
+        - Separates CLOSED vs OPEN positions
+        - For closed trades: Uses actual buy/sell prices
+        - For open positions: Uses linear growth estimation
         - Good for quick overview
-        - Less accurate for FX impact
         
         **🔬 Detailed Reconstruction:**
         - Fetches real historical prices from Yahoo Finance
@@ -264,9 +267,16 @@ def display_historical_section(client, current_positions, cash_data):
                 st.metric("Days Active", f"{days_active:,}")
             
             # Calculate historical portfolio value based on selected method
-            if "Simple Approximation" in method and get_simplified_approximation:
-                st.info("🔄 Creating simplified approximation...")
-                hist_data = get_simplified_approximation(orders_df, current_total)
+            if "Simple Approximation" in method:
+                st.info("🔄 Creating smart approximation (optimized for closed/open positions)...")
+                
+                # Use smart reconstruction if available, otherwise fallback
+                if smart_reconstruct_portfolio:
+                    hist_data = smart_reconstruct_portfolio(orders_df, holdings, current_total)
+                elif get_simplified_approximation:
+                    hist_data = get_simplified_approximation(orders_df, current_total)
+                else:
+                    hist_data = pd.DataFrame()
                 
                 if not hist_data.empty:
                     # Create enhanced chart with approximation
