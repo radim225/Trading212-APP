@@ -12,16 +12,16 @@ from typing import Dict, List, Any, Optional, Tuple
 # Cache for company names to avoid repeated API calls
 COMPANY_NAMES_CACHE = {}
 
-def parse_t212_ticker(ticker: str) -> Tuple[str, str]:
+def parse_t212_ticker(ticker: str) -> Tuple[str, str, str]:
     """
-    Parse Trading212's ticker format to extract the clean ticker and exchange.
+    Parse Trading212's ticker format to extract the clean ticker, exchange, and currency.
     Examples:
-        'AAPL_US_EQ' -> ('AAPL', 'US')
-        'CNX1_EQ' -> ('CNX1', 'LON')
-        'MSFT_US_EQ' -> ('MSFT', 'US')
+        'AAPL_US_EQ' -> ('AAPL', 'US', 'USD')
+        'CNX1_EQ' -> ('CNX1', 'LON', 'GBX')
+        'MSFT_US_EQ' -> ('MSFT', 'US', 'USD')
     """
     if not ticker:
-        return ticker, 'Unknown'
+        return ticker, 'Unknown', 'Unknown'
     
     # Trading212 format: TICKER_EXCHANGE_EQ or TICKER_EQ
     parts = ticker.split('_')
@@ -29,9 +29,21 @@ def parse_t212_ticker(ticker: str) -> Tuple[str, str]:
     if len(parts) >= 2:
         clean_ticker = parts[0]
         exchange = parts[1] if parts[1] != 'EQ' else 'LON'  # Default to London if no exchange specified
-        return clean_ticker, exchange
+        
+        # Determine currency based on exchange
+        currency_map = {
+            'US': 'USD',
+            'LON': 'GBX',
+            'FRA': 'EUR',
+            'GER': 'EUR',
+            'SWI': 'CHF',
+            'EQ': 'GBX'
+        }
+        currency = currency_map.get(exchange, 'USD')
+        
+        return clean_ticker, exchange, currency
     
-    return ticker, 'Unknown'
+    return ticker, 'Unknown', 'Unknown'
 
 def get_company_name(ticker: str, api_key: str = None, is_demo: bool = False) -> str:
     """
@@ -331,7 +343,7 @@ try:
                 
                 # Get ticker and parse it
                 ticker = pos.get("ticker", "Unknown")
-                clean_ticker, exchange = parse_t212_ticker(ticker)
+                clean_ticker, exchange, native_currency = parse_t212_ticker(ticker)
                 
                 # Get the company name
                 name = get_company_name(ticker, api_key, is_demo)
@@ -405,7 +417,23 @@ try:
                 current_price_czk = market_value_czk / quantity if quantity > 0 else 0
                 avg_price_czk = invested_czk / quantity if quantity > 0 else 0
                 
-                logger.info(f"Position {clean_ticker}: qty={quantity}, native_price={current_price_native}, invested={invested_czk:.2f}, market_value={market_value_czk:.2f}, ppl={ppl:.2f}, fxPpl={fx_ppl:.2f}")
+                # Format currency symbol for display
+                if native_currency == 'GBX':
+                    currency_symbol = 'p'
+                elif native_currency == 'USD':
+                    currency_symbol = '$'
+                elif native_currency == 'EUR':
+                    currency_symbol = '€'
+                elif native_currency == 'GBP':
+                    currency_symbol = '£'
+                else:
+                    currency_symbol = native_currency
+                
+                # Create dual currency display strings
+                avg_price_display = f"{average_price_native:,.2f} {currency_symbol} ({avg_price_czk:,.2f} CZK)"
+                current_price_display = f"{current_price_native:,.2f} {currency_symbol} ({current_price_czk:,.2f} CZK)"
+                
+                logger.info(f"Position {clean_ticker}: qty={quantity}, native={current_price_native} {native_currency}, czk={current_price_czk:.2f}, invested={invested_czk:.2f}, market_value={market_value_czk:.2f}, ppl={ppl:.2f}, fxPpl={fx_ppl:.2f}")
                 
                 # P&L percentage
                 pnl_percent = (total_pnl_czk / invested_czk * 100) if invested_czk > 0 else 0
@@ -416,8 +444,8 @@ try:
                     "Ticker": clean_ticker,
                     "Company Name": name,
                     "Shares": quantity,
-                    "Avg. Cost (CZK)": avg_price_czk,
-                    "Current Price (CZK)": current_price_czk,
+                    "Avg. Cost": avg_price_display,
+                    "Current Price": current_price_display,
                     "Market Value (CZK)": market_value_czk,
                     "Invested (CZK)": invested_czk,
                     "P&L (CZK)": total_pnl_czk,
@@ -460,17 +488,17 @@ try:
                 df_holdings,
                 column_config={
                     "Ticker": st.column_config.TextColumn("Ticker", width="small"),
-                    "Company Name": st.column_config.TextColumn("Company Name", width="large"),
-                    "Shares": st.column_config.NumberColumn("Shares", format="%.2f"),
-                    "Current Price (CZK)": st.column_config.NumberColumn("Current Price (CZK)", format="%.2f"),
-                    "Avg. Cost (CZK)": st.column_config.NumberColumn("Avg. Cost (CZK)", format="%.2f"),
+                    "Company Name": st.column_config.TextColumn("Company Name", width="medium"),
+                    "Shares": st.column_config.NumberColumn("Shares", format="%.4f"),
+                    "Avg. Cost": st.column_config.TextColumn("Avg. Cost", width="medium", help="Original currency (CZK equivalent)"),
+                    "Current Price": st.column_config.TextColumn("Current Price", width="medium", help="Original currency (CZK equivalent)"),
                     "Market Value (CZK)": st.column_config.NumberColumn("Market Value (CZK)", format="%.2f"),
                     "Invested (CZK)": st.column_config.NumberColumn("Invested (CZK)", format="%.2f"),
                     "P&L (CZK)": st.column_config.NumberColumn("P&L (CZK)", format="%.2f"),
                     "P&L (%)": st.column_config.NumberColumn("P&L (%)", format="%.4f")
                 },
                 hide_index=True,
-                width=1400
+                use_container_width=True
             )
             
             # Show data format explanation
