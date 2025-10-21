@@ -54,7 +54,7 @@ def get_company_name(ticker: str, api_key: str = None, is_demo: bool = False) ->
         return ticker
     
     # Parse the T212 ticker format
-    clean_ticker, exchange = parse_t212_ticker(ticker)
+    clean_ticker, exchange, _ = parse_t212_ticker(ticker)
     
     # Check cache first
     if ticker in COMPANY_NAMES_CACHE:
