@@ -8,6 +8,17 @@ import logging
 import traceback
 import time
 from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime, timedelta
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+
+# Import historical chart module
+try:
+    from historical_chart import display_historical_section
+except ImportError:
+    display_historical_section = None
+    logger.warning("Historical chart module not found")
 
 # Cache for company names to avoid repeated API calls
 COMPANY_NAMES_CACHE = {}
@@ -189,6 +200,61 @@ class T212Client:
     def get_metadata_instruments(self) -> List[Dict[str, Any]]:
         """Get list of all available instruments with metadata."""
         return self._get("/equity/metadata/instruments")
+    
+    def get_historical_orders(self, cursor: int = 0, ticker: str = None, limit: int = 50) -> Dict[str, Any]:
+        """Get historical order data."""
+        params = f"?cursor={cursor}&limit={limit}"
+        if ticker:
+            params += f"&ticker={ticker}"
+        return self._get(f"/equity/history/orders{params}")
+    
+    def get_all_historical_orders(self, ticker: str = None) -> List[Dict[str, Any]]:
+        """Fetch all historical orders (paginated)."""
+        all_orders = []
+        cursor = 0
+        
+        while True:
+            try:
+                response = self.get_historical_orders(cursor=cursor, ticker=ticker, limit=50)
+                if not response or 'items' not in response:
+                    break
+                
+                items = response.get('items', [])
+                if not items:
+                    break
+                
+                all_orders.extend(items)
+                logger.info(f"Fetched {len(items)} orders, total: {len(all_orders)}")
+                
+                # Check if there's a next page
+                next_page = response.get('nextPagePath')
+                if not next_page:
+                    break
+                
+                cursor += len(items)
+                time.sleep(0.2)  # Rate limiting
+                
+            except Exception as e:
+                logger.error(f"Error fetching historical orders: {e}")
+                break
+        
+        return all_orders
+    
+    def get_transactions(self, cursor: str = None, time_from: str = None, limit: int = 50) -> Dict[str, Any]:
+        """Get transaction history."""
+        params = f"?limit={limit}"
+        if cursor:
+            params += f"&cursor={cursor}"
+        if time_from:
+            params += f"&time={time_from}"
+        return self._get(f"/history/transactions{params}")
+    
+    def get_dividends(self, cursor: int = 0, ticker: str = None, limit: int = 50) -> Dict[str, Any]:
+        """Get dividend history."""
+        params = f"?cursor={cursor}&limit={limit}"
+        if ticker:
+            params += f"&ticker={ticker}"
+        return self._get(f"/history/dividends{params}")
 
 # ---------------------------- Main App ----------------------------
 # Sidebar
@@ -508,6 +574,14 @@ try:
                 
                 **Total P&L** = Price P&L + FX P&L = 4050.97 + (-94.87) = 3956.10 CZK
                 """)
+        
+        # Display historical performance section
+        if display_historical_section and not use_demo_data:
+            try:
+                display_historical_section(client, holdings, cash_data)
+            except Exception as e:
+                logger.error(f"Error displaying historical section: {e}")
+                st.error("Could not load historical performance data")
         
         # Add some spacing at the bottom
         st.markdown("---")
