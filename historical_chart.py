@@ -9,6 +9,16 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import streamlit as st
+import logging
+
+# Import portfolio reconstruction
+try:
+    from portfolio_reconstruction import reconstruct_portfolio_value, get_simplified_approximation
+except ImportError:
+    reconstruct_portfolio_value = None
+    get_simplified_approximation = None
+
+logger = logging.getLogger(__name__)
 
 
 def process_historical_orders(orders: List[Dict[str, Any]]) -> pd.DataFrame:
@@ -149,25 +159,39 @@ def display_historical_section(client, current_positions, cash_data):
     st.markdown("---")
     st.header("📈 Historical Performance")
     
-    # Info box explaining limitations
-    with st.expander("ℹ️ About Historical Data"):
+    # Reconstruction method selector
+    st.subheader("📈 Choose Visualization Method")
+    
+    method = st.radio(
+        "How would you like to view your historical performance?",
+        [
+            "📊 Simple Approximation (Fast, Estimated)",
+            "🔬 Detailed Reconstruction (Slow, Uses Yahoo Finance)",
+            "📋 Order History Only"
+        ],
+        help="Simple uses linear approximation. Detailed fetches real historical prices."
+    )
+    
+    # Info box
+    with st.expander("ℹ️ About Each Method"):
         st.markdown("""
-        **Current Limitations:**
-        - Trading212 API doesn't provide daily portfolio snapshots
-        - We can show order history but not actual daily portfolio values
-        - Historical prices and FX rates aren't available via API
+        **📊 Simple Approximation:**
+        - Fast and lightweight
+        - Estimates portfolio value between key dates
+        - Good for quick overview
+        - Less accurate for FX impact
         
-        **What you're seeing:**
-        - Cumulative invested amount over time
-        - Current total return based on today's values
-        - Historical orders and transactions
+        **🔬 Detailed Reconstruction:**
+        - Fetches real historical prices from Yahoo Finance
+        - Calculates actual portfolio value for each day
+        - More accurate representation
+        - Takes longer to load (1-2 minutes)
+        - Note: FX rates are approximated
         
-        **For detailed historical portfolio value:**
-        1. Use Trading212's CSV export feature in the app
-        2. Download historical data with actual daily values
-        3. Upload it here for analysis (future feature)
-        
-        **Alternatively:** We can estimate using external price APIs (less accurate for FX impact)
+        **📋 Order History Only:**
+        - Shows when you made trades
+        - Cumulative invested amount
+        - No estimated portfolio values
         """)
     
     # CSV Upload option
@@ -239,12 +263,108 @@ def display_historical_section(client, current_positions, cash_data):
                     days_active = 0
                 st.metric("Days Active", f"{days_active:,}")
             
-            # Calculate historical portfolio value
-            hist_data = calculate_portfolio_value_over_time(orders_df, current_positions)
-            
-            # Create and display chart
-            fig = create_pnl_chart(hist_data, current_total, current_invested)
-            st.plotly_chart(fig, use_container_width=True)
+            # Calculate historical portfolio value based on selected method
+            if "Simple Approximation" in method and get_simplified_approximation:
+                st.info("🔄 Creating simplified approximation...")
+                hist_data = get_simplified_approximation(orders_df, current_total)
+                
+                if not hist_data.empty:
+                    # Create enhanced chart with approximation
+                    fig = go.Figure()
+                    
+                    # Invested amount line
+                    fig.add_trace(go.Scatter(
+                        x=hist_data['Date'],
+                        y=hist_data['Invested'],
+                        name='Invested Amount',
+                        line=dict(color='#3498db', width=2, dash='dash')
+                    ))
+                    
+                    # Estimated portfolio value
+                    fig.add_trace(go.Scatter(
+                        x=hist_data['Date'],
+                        y=hist_data['Estimated_Value'],
+                        name='Estimated Portfolio Value',
+                        line=dict(color='#2ecc71', width=3),
+                        fill='tonexty',
+                        fillcolor='rgba(46, 204, 113, 0.1)'
+                    ))
+                    
+                    fig.update_layout(
+                        title="Portfolio Value Over Time (Approximation)",
+                        xaxis_title="Date",
+                        yaxis_title="Value (CZK)",
+                        height=500,
+                        hovermode='x unified'
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("Could not create approximation")
+                    
+            elif "Detailed Reconstruction" in method and reconstruct_portfolio_value:
+                st.warning("⏳ This will take 1-2 minutes. Fetching historical prices...")
+                
+                # Get date range
+                start_date = orders_df['date'].min()
+                end_date = pd.Timestamp.now()
+                
+                # Progress tracking
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                def progress_callback(message):
+                    status_text.text(message)
+                
+                try:
+                    # Reconstruct portfolio value
+                    hist_data = reconstruct_portfolio_value(
+                        orders,
+                        start_date,
+                        end_date,
+                        progress_callback
+                    )
+                    
+                    progress_bar.progress(100)
+                    status_text.text("✅ Reconstruction complete!")
+                    
+                    if not hist_data.empty:
+                        # Create detailed chart
+                        fig = go.Figure()
+                        
+                        fig.add_trace(go.Scatter(
+                            x=hist_data['Date'],
+                            y=hist_data['Portfolio_Value_CZK'],
+                            name='Portfolio Value',
+                            line=dict(color='#2ecc71', width=2),
+                            fill='tozeroy',
+                            fillcolor='rgba(46, 204, 113, 0.1)'
+                        ))
+                        
+                        fig.update_layout(
+                            title="Portfolio Value Over Time (Reconstructed from Yahoo Finance)",
+                            xaxis_title="Date",
+                            yaxis_title="Value (CZK)",
+                            height=500,
+                            hovermode='x unified'
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Show statistics
+                        st.success(f"📊 Calculated {len(hist_data)} days of portfolio data")
+                    else:
+                        st.error("Failed to reconstruct portfolio value")
+                        
+                except Exception as e:
+                    st.error(f"Error during reconstruction: {e}")
+                    st.exception(e)
+                    
+            else:
+                # Order history only
+                hist_data = calculate_portfolio_value_over_time(orders_df, current_positions)
+                fig = create_pnl_chart(hist_data, current_total, current_invested)
+                st.plotly_chart(fig, use_container_width=True)
             
             # Show recent orders table
             with st.expander("📋 Recent Orders"):
