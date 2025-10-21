@@ -453,9 +453,18 @@ try:
                 })
                 
             except Exception as e:
-                logger.error(f"Error processing position {pos.get('ticker', 'unknown')}: {str(e)}")
+                error_msg = f"Error processing position {pos.get('ticker', 'unknown')}: {str(e)}"
+                logger.error(error_msg)
                 logger.error(f"Problematic position data: {pos}")
+                logger.error(traceback.format_exc())
+                st.sidebar.error(f"⚠️ {error_msg}")
                 continue  # Skip this position but continue with others
+        
+        # Log processing summary
+        logger.info(f"Successfully processed {len(holdings)} out of {len(positions)} positions")
+        if len(holdings) < len(positions):
+            skipped = len(positions) - len(holdings)
+            st.sidebar.warning(f"⚠️ Skipped {skipped} positions due to errors")
         
         # Get PIE cash from cash balance response
         pie_cash = _as_float(cash_data.get('pieCash', 0))
