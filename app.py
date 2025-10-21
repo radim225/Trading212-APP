@@ -363,75 +363,45 @@ try:
                 # Total P&L in CZK (includes both price movement and FX impact)
                 total_pnl_czk = ppl + fx_ppl
                 
-                # Get maxBuy/maxSell which might already be in CZK
-                max_buy = _as_float(pos.get("maxBuy", 0))
+                # Get maxBuy/maxSell which are already in CZK
                 max_sell = _as_float(pos.get("maxSell", 0))
                 
-                # Try to use maxSell as current market value if available
+                # Use maxSell as market value (most reliable, already in CZK)
                 if max_sell > 0:
                     market_value_czk = max_sell
-                    # Calculate invested from market value and P&L
+                    # Calculate invested from: invested = market_value - total_pnl
                     invested_czk = market_value_czk - total_pnl_czk
                 else:
-                    # Fallback: try to calculate from quantity and prices
-                    # But adjust for currency (divide by 100 for pence)
-                    if exchange == 'LON' or (ticker.endswith('_EQ') and '_US_' not in ticker):
-                        # London stock - prices are in pence, convert to pounds then to CZK
-                        # We need the GBP/CZK exchange rate, but we don't have it easily
-                        # Best approach: use the P&L to derive correct values
-                        logger.warning(f"London stock {clean_ticker} without maxSell - estimating from P&L")
-                        # Make a rough estimate: current_price in pence, divide by 100
-                        estimated_gbp_price = current_price_native / 100
-                        # This is still not perfect without the exchange rate...
-                        # Better to skip calculation and use P&L only
-                        invested_czk = 0  # Will calculate below
-                        market_value_czk = 0
-                    else:
-                        # US stock or others - prices should be in USD or other major currency
-                        invested_czk = quantity * average_price_native
-                        market_value_czk = invested_czk + total_pnl_czk
-                
-                # If we still don't have invested amount, derive it from P&L percentage
-                # For display purposes, we need reasonable values
-                if invested_czk == 0 or market_value_czk == 0:
-                    # Use the PPL ratio to estimate
-                    # If we know total P&L and can estimate the return %
-                    # Actually, let's use a safer approach: trust the API's ppl values
-                    # and estimate invested as a proportion
-                    logger.warning(f"Could not calculate exact values for {clean_ticker}, using estimates")
-                    # Assume invested_czk from the average price ratio
-                    if current_price_native > 0:
-                        price_ratio = current_price_native / average_price_native if average_price_native > 0 else 1
-                        # If price doubled, that's 100% return
-                        estimated_return_pct = (price_ratio - 1) * 100
-                        # ppl / invested = return_pct / 100
-                        # invested = ppl * 100 / return_pct (approximately, ignoring FX)
-                        if abs(estimated_return_pct) > 0.01:
-                            invested_czk = abs(ppl * 100 / estimated_return_pct) if estimated_return_pct != 0 else 0
-                            market_value_czk = invested_czk + total_pnl_czk
-                        else:
-                            invested_czk = 1000  # fallback
-                            market_value_czk = invested_czk + total_pnl_czk
+                    # Fallback: estimate from quantity * price
+                    # This is a rough estimate and may not be accurate
+                    market_value_czk = quantity * current_price_native
+                    invested_czk = quantity * average_price_native
                 
                 # Derive current price in CZK from market value
                 current_price_czk = market_value_czk / quantity if quantity > 0 else 0
                 avg_price_czk = invested_czk / quantity if quantity > 0 else 0
                 
-                # Format currency symbol for display
-                if native_currency == 'GBX':
-                    currency_symbol = 'p'
-                elif native_currency == 'USD':
-                    currency_symbol = '$'
-                elif native_currency == 'EUR':
-                    currency_symbol = '€'
-                elif native_currency == 'GBP':
-                    currency_symbol = '£'
-                else:
-                    currency_symbol = native_currency
-                
-                # Create dual currency display strings
-                avg_price_display = f"{average_price_native:,.2f} {currency_symbol} ({avg_price_czk:,.2f} CZK)"
-                current_price_display = f"{current_price_native:,.2f} {currency_symbol} ({current_price_czk:,.2f} CZK)"
+                # Format currency symbol for display (handle encoding issues)
+                try:
+                    if native_currency == 'GBX':
+                        currency_symbol = 'p'
+                    elif native_currency == 'USD':
+                        currency_symbol = '$'
+                    elif native_currency == 'EUR':
+                        currency_symbol = 'EUR'
+                    elif native_currency == 'GBP':
+                        currency_symbol = 'GBP'
+                    else:
+                        currency_symbol = native_currency
+                    
+                    # Create dual currency display strings
+                    avg_price_display = f"{average_price_native:,.2f} {currency_symbol} ({avg_price_czk:,.2f} CZK)"
+                    current_price_display = f"{current_price_native:,.2f} {currency_symbol} ({current_price_czk:,.2f} CZK)"
+                except Exception as fmt_err:
+                    logger.error(f"Error formatting prices for {clean_ticker}: {fmt_err}")
+                    # Fallback to simple format
+                    avg_price_display = f"{avg_price_czk:,.2f} CZK"
+                    current_price_display = f"{current_price_czk:,.2f} CZK"
                 
                 logger.info(f"Position {clean_ticker}: qty={quantity}, native={current_price_native} {native_currency}, czk={current_price_czk:.2f}, invested={invested_czk:.2f}, market_value={market_value_czk:.2f}, ppl={ppl:.2f}, fxPpl={fx_ppl:.2f}")
                 
