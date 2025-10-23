@@ -3,6 +3,8 @@ Historical P&L Chart Module for Trading212 Portfolio App
 Provides interactive charting with FX impact visualization
 """
 
+import os
+import glob
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -11,7 +13,7 @@ from typing import List, Dict, Any
 import streamlit as st
 import logging
 
-# Import portfolio reconstruction
+# Import portfolio reconstruction and CSV parser
 try:
     from portfolio_reconstruction import reconstruct_portfolio_value, get_simplified_approximation
     from smart_reconstruction import smart_reconstruct_portfolio
@@ -19,6 +21,12 @@ except ImportError:
     reconstruct_portfolio_value = None
     get_simplified_approximation = None
     smart_reconstruct_portfolio = None
+
+try:
+    from csv_parser import parse_trading212_csv, build_invested_timeseries
+except ImportError:
+    parse_trading212_csv = None
+    build_invested_timeseries = None
 
 logger = logging.getLogger(__name__)
 
@@ -197,31 +205,109 @@ def display_historical_section(client, current_positions, cash_data):
         - No estimated portfolio values
         """)
     
-    # CSV Upload option
-    st.subheader("📤 Upload Historical Data")
+    # CSV Upload and Local CSV option
+    st.subheader("📤 Use Trading212 CSV (recommended)")
     uploaded_file = st.file_uploader(
-        "Upload Trading212 CSV export for accurate historical portfolio values",
+        "Upload Trading212 CSV export (12 months window is fine)",
         type=['csv'],
-        help="Download from Trading212 app: Account → Reports → Export"
+        help="Get it from Trading212 app: Account → Reports → Export"
     )
-    
+
+    # Also allow selecting an existing CSV from app directory
+    local_csv_files = sorted(
+        [f for f in glob.glob(os.path.join(os.getcwd(), "*.csv"))],
+        reverse=True
+    )
+    selected_local_csv = None
+    if local_csv_files:
+        selected_local_csv = st.selectbox(
+            "Or pick a CSV already in this folder:",
+            options=["(none)"] + [os.path.basename(p) for p in local_csv_files],
+            index=0
+        )
+
+    # Helper to process a CSV DataFrame into charts
+    def _render_csv_timeseries(csv_df: pd.DataFrame):
+        if parse_trading212_csv is None or build_invested_timeseries is None:
+            st.warning("CSV parser not available.")
+            return False
+        try:
+            parsed = parse_trading212_csv(csv_df)
+            if parsed.empty:
+                st.warning("CSV has no trade records to process.")
+                return False
+
+            daily = build_invested_timeseries(parsed)
+            if daily.empty:
+                st.warning("No time series could be built from CSV.")
+                return False
+
+            # Metrics
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric("From", daily['date'].min().strftime('%Y-%m-%d'))
+            with c2:
+                st.metric("To", daily['date'].max().strftime('%Y-%m-%d'))
+            with c3:
+                st.metric("Days", f"{(daily['date'].max() - daily['date'].min()).days + 1}")
+            with c4:
+                st.metric("Net Invested (last)", f"{daily['net_invested_czk'].iloc[-1]:,.2f} CZK")
+
+            # Plot
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=daily['date'], y=daily['net_invested_czk'],
+                name='Net Invested (CZK)', line=dict(color='#4a90e2', width=2),
+                fill='tozeroy', fillcolor='rgba(74, 144, 226, 0.1)'
+            ))
+            fig.add_trace(go.Scatter(
+                x=daily['date'], y=daily['realized_pnl_czk'],
+                name='Realized P&L (CZK)', line=dict(color='#2ecc71', width=2)
+            ))
+            fig.update_layout(
+                title="Invested and Realized P&L over time (from CSV)",
+                xaxis_title="Date", yaxis_title="CZK",
+                height=520, hovermode='x unified'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.caption("Note: CSV contains the last 12 months of activity, so earlier history is not included.")
+            return True
+        except Exception as e:
+            st.error(f"CSV processing error: {e}")
+            st.exception(e)
+            return False
+
+    csv_rendered = False
+    # If an uploaded CSV is provided, process it
     if uploaded_file is not None:
         try:
-            # Read CSV
             csv_df = pd.read_csv(uploaded_file)
-            st.success(f"✅ Loaded {len(csv_df)} records from CSV")
-            
-            # Display preview
-            with st.expander("📋 CSV Preview"):
-                st.dataframe(csv_df.head(10), use_container_width=True)
-            
-            # TODO: Process CSV and create historical value chart
-            st.info("CSV processing coming soon! For now, showing data from API...")
+            st.success(f"✅ Loaded {len(csv_df)} rows from uploaded CSV")
+            with st.expander("📋 CSV Preview", expanded=False):
+                st.dataframe(csv_df.head(12), use_container_width=True)
+            csv_rendered = _render_csv_timeseries(csv_df)
         except Exception as e:
-            st.error(f"Error reading CSV: {e}")
+            st.error(f"Error reading uploaded CSV: {e}")
+
+    # Else, if a local CSV is selected, process it
+    if not csv_rendered and selected_local_csv and selected_local_csv != "(none)":
+        try:
+            path = os.path.join(os.getcwd(), selected_local_csv)
+            csv_df = pd.read_csv(path)
+            st.success(f"✅ Loaded {len(csv_df)} rows from {selected_local_csv}")
+            with st.expander("📋 CSV Preview", expanded=False):
+                st.dataframe(csv_df.head(12), use_container_width=True)
+            csv_rendered = _render_csv_timeseries(csv_df)
+        except Exception as e:
+            st.error(f"Error reading local CSV: {e}")
     
-    # Fetch historical data
-    with st.spinner("Loading historical data..."):
+    # If CSV successfully rendered, we can skip API-based reconstructions
+    if csv_rendered:
+        return
+
+    # Otherwise, fall back to API-based methods
+    with st.spinner("Loading historical data from Trading212 API..."):
         try:
             st.info("📥 Fetching historical orders from Trading212...")
             orders = client.get_all_historical_orders()
@@ -272,7 +358,7 @@ def display_historical_section(client, current_positions, cash_data):
                 
                 # Use smart reconstruction if available, otherwise fallback
                 if smart_reconstruct_portfolio:
-                    hist_data = smart_reconstruct_portfolio(orders_df, holdings, current_total)
+                    hist_data = smart_reconstruct_portfolio(orders_df, current_positions, current_total)
                 elif get_simplified_approximation:
                     hist_data = get_simplified_approximation(orders_df, current_total)
                 else:
